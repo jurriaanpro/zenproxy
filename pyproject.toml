@@ -1,0 +1,39 @@
+[project]
+name = "zenproxy"
+version = "0.1.0"
+description = "Proxy that unifies one or more Zendure home battery devices behind a single smart power interface"
+readme = "README.md"
+authors = [
+    { name = "Jurriaan Proos", email = "other@jurriaanproos.nl" }
+]
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+zenproxy = "zenproxy:main"
+
+[build-system]
+requires = ["uv_build>=0.9.22,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.0",
+    "pytest>=9.1.1",
+    "ruff>=0.15.22",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
