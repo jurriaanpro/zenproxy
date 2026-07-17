@@ -1,0 +1,16 @@
+virtual_device:
+  sn: ZENPROXY000001
+  model: ZenProxy
+
+devices:
+  - sn: WOB1NHMAMXXXXX1
+    host: 192.168.1.101
+    port: 80
+  - sn: WOB1NHMAMXXXXX2
+    host: 192.168.1.102
+    port: 80
+
+server:
+  host: 0.0.0.0
+  port: 8080
+  poll_interval_seconds: 5.0
