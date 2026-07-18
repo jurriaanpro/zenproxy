@@ -1,11 +1,9 @@
 virtual_sn: ZENPROXY000001
 
 devices:
-  - sn: WOB1NHMAMXXXXX1
-    host: 192.168.1.101
+  - host: 192.168.1.101
     port: 80
-  - sn: WOB1NHMAMXXXXX2
-    host: 192.168.1.102
+  - host: 192.168.1.102
     port: 80
 
 server:

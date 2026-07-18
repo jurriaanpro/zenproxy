@@ -20,9 +20,9 @@ class Aggregator:
         reports: dict[str, Properties] = {}
         for client, result in zip(self.clients, results, strict=True):
             if isinstance(result, BaseException):
-                logger.warning("device %s unreachable: %s", client.device.sn, result)
+                logger.warning("device %s unreachable: %s", client.label, result)
                 continue
-            reports[client.device.sn] = result
+            reports[client.label] = result
         return reports
 
     async def write_properties(self, properties: Properties) -> None:
@@ -38,4 +38,4 @@ class Aggregator:
         )
         for client, result in zip(self.clients, results, strict=True):
             if isinstance(result, BaseException):
-                logger.warning("device %s write failed: %s", client.device.sn, result)
+                logger.warning("device %s write failed: %s", client.label, result)

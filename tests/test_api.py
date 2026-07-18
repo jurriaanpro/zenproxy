@@ -10,8 +10,8 @@ from zenproxy.config import AppConfig, RealDevice
 CONFIG = AppConfig(
     virtual_sn="VIRTUAL1",
     devices=[
-        RealDevice(sn="DEV1", host="10.0.0.1", port=80),
-        RealDevice(sn="DEV2", host="10.0.0.2", port=80),
+        RealDevice(host="10.0.0.1", port=80),
+        RealDevice(host="10.0.0.2", port=80),
     ],
 )
 
@@ -19,10 +19,14 @@ CONFIG = AppConfig(
 @respx.mock
 def test_get_properties_report_returns_per_device_breakdown() -> None:
     respx.get("http://10.0.0.1:80/properties/report").mock(
-        return_value=httpx.Response(200, json={"properties": {"outputHomePower": 100}})
+        return_value=httpx.Response(
+            200, json={"sn": "DEV1", "properties": {"outputHomePower": 100}}
+        )
     )
     respx.get("http://10.0.0.2:80/properties/report").mock(
-        return_value=httpx.Response(200, json={"properties": {"outputHomePower": 200}})
+        return_value=httpx.Response(
+            200, json={"sn": "DEV2", "properties": {"outputHomePower": 200}}
+        )
     )
 
     with TestClient(create_app(CONFIG)) as test_client:
@@ -40,6 +44,12 @@ def test_get_properties_report_returns_per_device_breakdown() -> None:
 
 @respx.mock
 def test_post_properties_write_splits_output_limit() -> None:
+    respx.get("http://10.0.0.1:80/properties/report").mock(
+        return_value=httpx.Response(200, json={"sn": "DEV1", "properties": {}})
+    )
+    respx.get("http://10.0.0.2:80/properties/report").mock(
+        return_value=httpx.Response(200, json={"sn": "DEV2", "properties": {}})
+    )
     dev1_route = respx.post("http://10.0.0.1:80/properties/write").mock(
         return_value=httpx.Response(200, json={})
     )

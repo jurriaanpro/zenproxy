@@ -6,10 +6,9 @@ from zenproxy.device_client import DeviceClient, Properties
 
 
 class FakeDeviceClient(DeviceClient):
-    def __init__(
-        self, device: RealDevice, report: Properties | None = None, fail: bool = False
-    ) -> None:
-        self.device = device
+    def __init__(self, sn: str, report: Properties | None = None, fail: bool = False) -> None:
+        self.device = RealDevice(host="10.0.0.1")
+        self.sn = sn
         self._report = report or {}
         self._fail = fail
         self.written: Properties | None = None
@@ -26,7 +25,7 @@ class FakeDeviceClient(DeviceClient):
 
 
 def make_client(sn: str, report: Properties | None = None, fail: bool = False) -> FakeDeviceClient:
-    return FakeDeviceClient(RealDevice(sn=sn, host="10.0.0.1"), report=report, fail=fail)
+    return FakeDeviceClient(sn, report=report, fail=fail)
 
 
 @pytest.mark.asyncio

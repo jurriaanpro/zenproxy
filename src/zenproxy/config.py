@@ -5,7 +5,6 @@ from pydantic import BaseModel
 
 
 class RealDevice(BaseModel):
-    sn: str
     host: str
     port: int = 80
 
