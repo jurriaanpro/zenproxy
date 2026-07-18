@@ -151,29 +151,95 @@ async def test_get_aggregated_report_falls_back_to_first_device_for_unhandled_fi
 
 
 @pytest.mark.asyncio
-async def test_write_properties_splits_output_limit_by_soc_and_capacity() -> None:
+async def test_write_properties_concentrates_output_limit_on_highest_priority_device() -> None:
+    # A single device can absorb the whole 100W request on its own, so it
+    # takes all of it rather than splitting a trickle across both devices.
     a = make_client("A", report={"electricLevel": 80}, pack_data=PACK_1920WH)
     b = make_client("B", report={"electricLevel": 20}, pack_data=PACK_1920WH)
     aggregator = Aggregator([a, b])
 
     await aggregator.write_properties({"outputLimit": 100})
 
-    assert a.written == {"outputLimit": 80.0}
-    assert b.written == {"outputLimit": 20.0}
+    assert a.written == {"outputLimit": 100.0}
+    assert b.written == {"outputLimit": 0.0}
 
 
 @pytest.mark.asyncio
-async def test_write_properties_splits_evenly_when_state_is_equal() -> None:
+async def test_write_properties_concentrates_small_request_on_a_single_device() -> None:
+    # The canonical case this behavior targets: a 200W request shouldn't
+    # become two 100W trickles when one device could handle it alone.
+    a = make_client("A", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    b = make_client("B", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([a, b])
+
+    await aggregator.write_properties({"outputLimit": 200})
+
+    assert a.written == {"outputLimit": 200.0}
+    assert b.written == {"outputLimit": 0.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_evenly_divides_once_the_per_device_threshold_is_met() -> None:
+    # 300W across 2 devices would be 150W each -- at, not below, the 200W
+    # per-device minimum -- but A can only take 150W anyway (its own cap),
+    # so both land on 150W regardless: A is capped, and B's even share
+    # exactly matches A's cap here.
+    a = make_client(
+        "A", report={"electricLevel": 50, "inverseMaxPower": 150}, pack_data=PACK_1920WH
+    )
+    b = make_client("B", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([a, b])
+
+    await aggregator.write_properties({"outputLimit": 300})
+
+    assert a.written == {"outputLimit": 150.0}
+    assert b.written == {"outputLimit": 150.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_splits_evenly_across_two_devices_at_400w() -> None:
+    # The canonical "evenly divided" example: 400W across two 200W-threshold
+    # devices means 200W each clears the per-device minimum, so both
+    # participate rather than concentrating on one.
+    a = make_client("A", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    b = make_client("B", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([a, b])
+
+    await aggregator.write_properties({"outputLimit": 400})
+
+    assert a.written == {"outputLimit": 200.0}
+    assert b.written == {"outputLimit": 200.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_keeps_single_device_just_under_the_even_split_total() -> None:
+    # One watt under the 400W even-split point (2 devices x 200W threshold):
+    # still concentrated entirely on a single device.
+    a = make_client("A", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    b = make_client("B", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([a, b])
+
+    await aggregator.write_properties({"outputLimit": 399})
+
+    assert a.written == {"outputLimit": 399.0}
+    assert b.written == {"outputLimit": 0.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_uses_only_as_many_devices_as_the_threshold_allows() -> None:
+    # 450W across 3 equally-weighted devices: splitting across all 3 would
+    # give 150W each, under the 200W minimum, so only the top 2 by priority
+    # participate (225W each) and the third is left untouched.
     a = make_client("A", report={"electricLevel": 50}, pack_data=PACK_1920WH)
     b = make_client("B", report={"electricLevel": 50}, pack_data=PACK_1920WH)
     c = make_client("C", report={"electricLevel": 50}, pack_data=PACK_1920WH)
     aggregator = Aggregator([a, b, c])
 
-    await aggregator.write_properties({"outputLimit": 300})
+    await aggregator.write_properties({"outputLimit": 450})
 
-    assert a.written == {"outputLimit": 100.0}
-    assert b.written == {"outputLimit": 100.0}
-    assert c.written == {"outputLimit": 100.0}
+    assert a.written == {"outputLimit": 225.0}
+    assert b.written == {"outputLimit": 225.0}
+    assert c.written == {"outputLimit": 0.0}
 
 
 @pytest.mark.asyncio
@@ -184,8 +250,8 @@ async def test_write_properties_passes_through_non_split_properties() -> None:
 
     await aggregator.write_properties({"outputLimit": 100, "acMode": 2})
 
-    assert a.written == {"outputLimit": 50.0, "acMode": 2}
-    assert b.written == {"outputLimit": 50.0, "acMode": 2}
+    assert a.written == {"outputLimit": 100.0, "acMode": 2}
+    assert b.written == {"outputLimit": 0.0, "acMode": 2}
 
 
 @pytest.mark.asyncio
@@ -230,7 +296,10 @@ async def test_write_properties_reads_min_soc_and_soc_set_as_tenths_of_a_percent
 
 
 @pytest.mark.asyncio
-async def test_write_properties_caps_output_at_inverse_max_power_and_redistributes() -> None:
+async def test_write_properties_caps_a_device_and_gives_the_rest_to_its_sibling() -> None:
+    # At k=1 CAPPED (tied for top priority) can only supply 30W of the 100W
+    # request, so the group expands to both devices: CAPPED is water-filled
+    # up to its 30W cap, and OPEN absorbs the remaining 70W.
     capped = make_client(
         "CAPPED", report={"electricLevel": 50, "inverseMaxPower": 30}, pack_data=PACK_1920WH
     )
@@ -241,6 +310,30 @@ async def test_write_properties_caps_output_at_inverse_max_power_and_redistribut
 
     assert capped.written == {"outputLimit": 30.0}
     assert open_ended.written == {"outputLimit": 70.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_splits_evenly_water_filled_by_individual_caps() -> None:
+    # 1040W across 3 devices clears the even-split threshold for all three
+    # (1040/3 > 200), so all three participate from the start; C is
+    # water-filled up to its 50W cap, and the remaining 990W splits evenly
+    # between A and B (495W each).
+    a = make_client(
+        "A", report={"electricLevel": 50, "inverseMaxPower": 500}, pack_data=PACK_1920WH
+    )
+    b = make_client(
+        "B", report={"electricLevel": 50, "inverseMaxPower": 500}, pack_data=PACK_1920WH
+    )
+    c = make_client(
+        "C", report={"electricLevel": 50, "inverseMaxPower": 50}, pack_data=PACK_1920WH
+    )
+    aggregator = Aggregator([a, b, c])
+
+    await aggregator.write_properties({"outputLimit": 1040})
+
+    assert a.written == {"outputLimit": 495.0}
+    assert b.written == {"outputLimit": 495.0}
+    assert c.written == {"outputLimit": 50.0}
 
 
 @pytest.mark.asyncio
@@ -343,15 +436,20 @@ async def test_write_properties_splits_charge_max_limit_evenly_by_equal_capacity
 
 
 @pytest.mark.asyncio
-async def test_write_properties_splits_inverse_max_power_proportional_to_capacity() -> None:
+async def test_write_properties_splits_inverse_max_power_evenly_once_threshold_is_met() -> None:
+    # 900W clears the 2-device even-split threshold (900/2 > 200), so both
+    # participate -- LARGE's greater capacity-weighted headroom only
+    # affects priority ordering (irrelevant here, since both are used), not
+    # the amount each receives: this ceiling field has no per-device cap, so
+    # the split is a plain 450/450 regardless of capacity.
     small = make_client("SMALL", report={"electricLevel": 50}, pack_data=PACK_960WH)
     large = make_client("LARGE", report={"electricLevel": 50}, pack_data=PACK_1920WH)
     aggregator = Aggregator([small, large])
 
     await aggregator.write_properties({"inverseMaxPower": 900})
 
-    assert small.written == {"inverseMaxPower": 300.0}
-    assert large.written == {"inverseMaxPower": 600.0}
+    assert small.written == {"inverseMaxPower": 450.0}
+    assert large.written == {"inverseMaxPower": 450.0}
 
 
 @pytest.mark.asyncio

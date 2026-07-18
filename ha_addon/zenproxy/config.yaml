@@ -1,5 +1,5 @@
 name: zenproxy
-version: "0.1.0"
+version: "0.2.0"
 slug: zenproxy
 description: Unifies one or more Zendure home battery devices behind a single virtual device API
 url: https://github.com/jurriaanpro/zenproxy

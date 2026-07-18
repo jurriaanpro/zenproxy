@@ -65,6 +65,15 @@ INPUT_SPLIT_PROPERTY = "inputLimit"
 CHARGE_CAP_PROPERTY = "chargeMaxLimit"
 DISCHARGE_CAP_PROPERTY = "inverseMaxPower"
 
+# Real Zendure devices shouldn't be asked to charge/discharge at a very low
+# rate just because a request happens to get split evenly: e.g. a 300W
+# request across two devices is better handled by one device alone than as
+# two 150W trickles. Zendure doesn't expose a real per-device minimum, so
+# this is a conservative, hardcoded value applied uniformly to all devices:
+# a request is spread across as many devices as keep each device's even
+# share at or above this value.
+PER_DEVICE_MIN_WATTS = 200.0
+
 DEFAULT_MIN_SOC = 0
 DEFAULT_SOC_SET = 100
 
@@ -203,6 +212,39 @@ def _distribute_with_caps(
             remaining_total -= cap
             del free[client]
 
+    return shares
+
+
+def _priority_split(
+    total: float,
+    weights: dict[DeviceClient, float],
+    caps: dict[DeviceClient, float],
+    per_device_min: float = PER_DEVICE_MIN_WATTS,
+) -> dict[DeviceClient, float]:
+    """Evenly split `total` across as many devices as keep each one's even share
+    at or above `per_device_min`, water-filled against each device's own cap.
+
+    Devices are brought in, in priority order (highest SoC-weighted headroom
+    first), starting from the largest group size whose even share clears the
+    threshold. If that group's combined cap can't actually cover `total`, the
+    next-priority device is added regardless of the threshold -- a genuine
+    capacity shortfall always takes precedence over avoiding a thin split.
+    """
+    priority = sorted(weights, key=lambda c: weights[c], reverse=True)
+    n = len(priority)
+    if n == 0 or total <= 0:
+        return {}
+
+    k = min(n, max(1, int((total + 1e-9) // per_device_min)))
+    shares: dict[DeviceClient, float] = {}
+    while k <= n:
+        active = priority[:k]
+        even_weights = dict.fromkeys(active, 1.0)
+        active_caps = {client: caps.get(client, float("inf")) for client in active}
+        shares = _distribute_with_caps(total, even_weights, active_caps)
+        if sum(shares.values()) >= total - 1e-6:
+            break
+        k += 1
     return shares
 
 
@@ -370,7 +412,7 @@ class Aggregator:
                 per_device[client][property_name] = share
             return
 
-        shares = _distribute_with_caps(total, weights, caps)
+        shares = _priority_split(total, weights, caps)
         distributed = sum(shares.values())
         if distributed < total - 1e-6:
             logger.warning(
@@ -398,9 +440,13 @@ class Aggregator:
         charging: bool,
     ) -> None:
         """Split a chargeMaxLimit/inverseMaxPower write the same way as the matching power
-        flow (outputLimit/inputLimit): weighted by SoC headroom and capacity, excluding
-        devices at their floor/ceiling. Unlike the flow split, there's no further cap to
-        water-fill against here -- these fields *are* the ceiling.
+        flow (outputLimit/inputLimit): prioritized by SoC headroom and capacity, excluding
+        devices at their floor/ceiling, and concentrated on as few devices as possible
+        (see `_priority_split`) rather than spread thin across all of them. Unlike the
+        flow split, there's no further per-device cap to fill against here -- these
+        fields *are* the ceiling -- so a device either gets the full remaining total or
+        nothing. Note a device zeroed out this way isn't locked out permanently: it's
+        only until the next chargeMaxLimit/inverseMaxPower write recomputes the split.
         """
         weights = self._soc_weighted_headroom(states, property_name, charging=charging)
         total_weight = sum(weights.values())
@@ -415,7 +461,8 @@ class Aggregator:
                 per_device[client][property_name] = share
             return
 
-        shares = {client: total * weight / total_weight for client, weight in weights.items()}
+        caps = dict.fromkeys(weights, float("inf"))
+        shares = _priority_split(total, weights, caps)
         logger.info(
             "{} split of {}: {}",
             property_name,
