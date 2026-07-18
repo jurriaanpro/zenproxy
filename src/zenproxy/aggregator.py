@@ -6,9 +6,9 @@ from zenproxy.device_client import DeviceClient, Properties
 
 logger = logging.getLogger(__name__)
 
-# Properties that represent a power flow or a combined limit: summing across
-# devices gives the virtual device's total, matching what a real device
-# would report for its own combined pack output.
+# Properties that represent a power flow, a combined limit, or a count:
+# summing across devices gives the virtual device's total, matching what a
+# real device would report for its own combined pack output.
 SUM_PROPERTIES = frozenset(
     {
         "outputHomePower",
@@ -22,6 +22,7 @@ SUM_PROPERTIES = frozenset(
         "inputLimit",
         "inverseMaxPower",
         "chargeMaxLimit",
+        "packNum",
     }
 )
 
@@ -29,6 +30,24 @@ SUM_PROPERTIES = frozenset(
 # device's capacity, so a small nearly-full device doesn't skew the result
 # as much as a large one.
 CAPACITY_WEIGHTED_AVERAGE_PROPERTIES = frozenset({"electricLevel"})
+
+# Properties averaged plainly across reachable devices.
+AVERAGE_PROPERTIES = frozenset({"BatVolt", "remainOutTime"})
+
+# Properties where the worst case (highest value) across devices should win.
+MAX_PROPERTIES = frozenset({"hyperTmp", "is_error", "minSoc"})
+
+# Properties where the most conservative (lowest value) across devices should win.
+MIN_PROPERTIES = frozenset({"rssi", "socSet", "socStatus", "gridState"})
+
+_HANDLED_PROPERTIES = (
+    SUM_PROPERTIES
+    | CAPACITY_WEIGHTED_AVERAGE_PROPERTIES
+    | AVERAGE_PROPERTIES
+    | MAX_PROPERTIES
+    | MIN_PROPERTIES
+    | {"socLimit"}
+)
 
 OUTPUT_SPLIT_PROPERTY = "outputLimit"
 INPUT_SPLIT_PROPERTY = "inputLimit"
@@ -64,15 +83,34 @@ def _device_capacity_wh(client: DeviceClient) -> float:
     return capacity
 
 
-def _aggregate_properties(states: dict[DeviceClient, Properties]) -> Properties:
+def _numeric_values(states: dict[DeviceClient, Properties], name: str) -> list[float]:
+    return [value for state in states.values() if isinstance(value := state.get(name), int | float)]
+
+
+def _aggregate_properties(
+    clients: list[DeviceClient], states: dict[DeviceClient, Properties]
+) -> Properties:
     aggregated: Properties = {}
 
     for name in SUM_PROPERTIES:
-        numeric_values = [
-            value for state in states.values() if isinstance(value := state.get(name), int | float)
-        ]
-        if numeric_values:
-            aggregated[name] = sum(numeric_values)
+        values = _numeric_values(states, name)
+        if values:
+            aggregated[name] = sum(values)
+
+    for name in AVERAGE_PROPERTIES:
+        values = _numeric_values(states, name)
+        if values:
+            aggregated[name] = sum(values) / len(values)
+
+    for name in MAX_PROPERTIES:
+        values = _numeric_values(states, name)
+        if values:
+            aggregated[name] = max(values)
+
+    for name in MIN_PROPERTIES:
+        values = _numeric_values(states, name)
+        if values:
+            aggregated[name] = min(values)
 
     for name in CAPACITY_WEIGHTED_AVERAGE_PROPERTIES:
         weighted_sum = 0.0
@@ -86,6 +124,27 @@ def _aggregate_properties(states: dict[DeviceClient, Properties]) -> Properties:
             weight_total += weight
         if weight_total > 0:
             aggregated[name] = weighted_sum / weight_total
+
+    soc_limits = _numeric_values(states, "socLimit")
+    if soc_limits:
+        if all(v == 1 for v in soc_limits):
+            aggregated["socLimit"] = 1
+        elif all(v == 2 for v in soc_limits):
+            aggregated["socLimit"] = 2
+        else:
+            aggregated["socLimit"] = 0
+
+    # Anything not explicitly aggregated above (config/status flags like
+    # acMode, gridStandard, faultLevel, ...) is passed through unchanged
+    # from the first reachable device, so nothing is silently dropped.
+    for client in clients:
+        fallback_state = states.get(client)
+        if fallback_state is None:
+            continue
+        for name, value in fallback_state.items():
+            if name not in _HANDLED_PROPERTIES and name not in aggregated:
+                aggregated[name] = value
+        break
 
     return aggregated
 
@@ -153,7 +212,7 @@ class Aggregator:
 
     async def get_aggregated_report(self) -> tuple[Properties, list[dict[str, Any]]]:
         states = await self._gather_states()
-        return _aggregate_properties(states), _merged_pack_data(states)
+        return _aggregate_properties(self.clients, states), _merged_pack_data(states)
 
     async def write_properties(self, properties: Properties) -> None:
         per_device: dict[DeviceClient, Properties] = {

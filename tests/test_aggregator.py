@@ -86,6 +86,64 @@ async def test_get_aggregated_report_skips_unreachable_devices() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_aggregated_report_applies_min_max_and_average_rules() -> None:
+    a = make_client(
+        "A",
+        report={"hyperTmp": 3000, "rssi": -70, "minSoc": 50, "socSet": 900, "BatVolt": 5000},
+        pack_data=PACK_1920WH,
+    )
+    b = make_client(
+        "B",
+        report={"hyperTmp": 3200, "rssi": -60, "minSoc": 100, "socSet": 850, "BatVolt": 5100},
+        pack_data=PACK_1920WH,
+    )
+    aggregator = Aggregator([a, b])
+
+    properties, _ = await aggregator.get_aggregated_report()
+
+    assert properties == {
+        "hyperTmp": 3200,  # max: worst-case temperature
+        "rssi": -70,  # min: weakest signal
+        "minSoc": 100,  # max: strictest floor
+        "socSet": 850,  # min: most conservative target
+        "BatVolt": 5050.0,  # plain average
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_aggregated_report_socLimit_consensus() -> None:
+    both_discharge_limited = Aggregator(
+        [
+            make_client("A", report={"socLimit": 2}, pack_data=PACK_1920WH),
+            make_client("B", report={"socLimit": 2}, pack_data=PACK_1920WH),
+        ]
+    )
+    mixed = Aggregator(
+        [
+            make_client("A", report={"socLimit": 2}, pack_data=PACK_1920WH),
+            make_client("B", report={"socLimit": 0}, pack_data=PACK_1920WH),
+        ]
+    )
+
+    both_properties, _ = await both_discharge_limited.get_aggregated_report()
+    mixed_properties, _ = await mixed.get_aggregated_report()
+
+    assert both_properties["socLimit"] == 2
+    assert mixed_properties["socLimit"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_aggregated_report_falls_back_to_first_device_for_unhandled_fields() -> None:
+    a = make_client("A", report={"acMode": 2, "faultLevel": 0}, pack_data=PACK_1920WH)
+    b = make_client("B", report={"acMode": 1, "faultLevel": 1}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([a, b])
+
+    properties, _ = await aggregator.get_aggregated_report()
+
+    assert properties == {"acMode": 2, "faultLevel": 0}
+
+
+@pytest.mark.asyncio
 async def test_write_properties_splits_output_limit_by_soc_and_capacity() -> None:
     a = make_client("A", report={"electricLevel": 80}, pack_data=PACK_1920WH)
     b = make_client("B", report={"electricLevel": 20}, pack_data=PACK_1920WH)
