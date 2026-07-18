@@ -13,6 +13,7 @@ class DeviceClient:
         self.device = device
         self._client = client
         self.sn: str | None = None
+        self.pack_data: list[dict[str, Any]] = []
 
     def _base_url(self) -> str:
         return f"http://{self.device.host}:{self.device.port}"
@@ -27,6 +28,7 @@ class DeviceClient:
         body: dict[str, Any] = response.json()
         if "sn" in body:
             self.sn = body["sn"]
+        self.pack_data = body.get("packData", [])
         properties: Properties = body.get("properties", body)
         return properties
 

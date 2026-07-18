@@ -1,16 +1,27 @@
+from typing import Any
+
 import pytest
 
 from zenproxy.aggregator import Aggregator
 from zenproxy.config import RealDevice
 from zenproxy.device_client import DeviceClient, Properties
 
+PACK_1920WH = [{"packType": 70}]
+
 
 class FakeDeviceClient(DeviceClient):
-    def __init__(self, sn: str, report: Properties | None = None, fail: bool = False) -> None:
+    def __init__(
+        self,
+        sn: str,
+        report: Properties | None = None,
+        fail: bool = False,
+        pack_data: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.device = RealDevice(host="10.0.0.1")
         self.sn = sn
         self._report = report or {}
         self._fail = fail
+        self.pack_data = pack_data or []
         self.written: Properties | None = None
 
     async def get_report(self) -> Properties:
@@ -24,8 +35,13 @@ class FakeDeviceClient(DeviceClient):
         self.written = properties
 
 
-def make_client(sn: str, report: Properties | None = None, fail: bool = False) -> FakeDeviceClient:
-    return FakeDeviceClient(sn, report=report, fail=fail)
+def make_client(
+    sn: str,
+    report: Properties | None = None,
+    fail: bool = False,
+    pack_data: list[dict[str, Any]] | None = None,
+) -> FakeDeviceClient:
+    return FakeDeviceClient(sn, report=report, fail=fail, pack_data=pack_data)
 
 
 @pytest.mark.asyncio
@@ -40,37 +56,102 @@ async def test_get_report_skips_unreachable_devices() -> None:
 
 
 @pytest.mark.asyncio
-async def test_write_properties_splits_output_limit_evenly() -> None:
-    a = make_client("A")
-    b = make_client("B")
-    c = make_client("C")
+async def test_write_properties_splits_output_limit_by_soc_and_capacity() -> None:
+    a = make_client("A", report={"electricLevel": 80}, pack_data=PACK_1920WH)
+    b = make_client("B", report={"electricLevel": 20}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([a, b])
+
+    await aggregator.write_properties({"outputLimit": 100})
+
+    assert a.written == {"outputLimit": 80.0}
+    assert b.written == {"outputLimit": 20.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_splits_evenly_when_state_is_equal() -> None:
+    a = make_client("A", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    b = make_client("B", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    c = make_client("C", report={"electricLevel": 50}, pack_data=PACK_1920WH)
     aggregator = Aggregator([a, b, c])
 
     await aggregator.write_properties({"outputLimit": 300})
 
-    assert a.written == {"outputLimit": 100}
-    assert b.written == {"outputLimit": 100}
-    assert c.written == {"outputLimit": 100}
+    assert a.written == {"outputLimit": 100.0}
+    assert b.written == {"outputLimit": 100.0}
+    assert c.written == {"outputLimit": 100.0}
 
 
 @pytest.mark.asyncio
 async def test_write_properties_passes_through_non_split_properties() -> None:
-    a = make_client("A")
-    b = make_client("B")
+    a = make_client("A", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    b = make_client("B", report={"electricLevel": 50}, pack_data=PACK_1920WH)
     aggregator = Aggregator([a, b])
 
     await aggregator.write_properties({"outputLimit": 100, "acMode": 2})
 
-    assert a.written == {"outputLimit": 50, "acMode": 2}
-    assert b.written == {"outputLimit": 50, "acMode": 2}
+    assert a.written == {"outputLimit": 50.0, "acMode": 2}
+    assert b.written == {"outputLimit": 50.0, "acMode": 2}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_excludes_device_at_or_below_min_soc() -> None:
+    low = make_client("LOW", report={"electricLevel": 5, "minSoc": 100}, pack_data=PACK_1920WH)
+    ok = make_client("OK", report={"electricLevel": 80}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([low, ok])
+
+    await aggregator.write_properties({"outputLimit": 100})
+
+    assert low.written == {"outputLimit": 0.0}
+    assert ok.written == {"outputLimit": 100.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_excludes_device_at_or_above_soc_set_when_charging() -> None:
+    full = make_client("FULL", report={"electricLevel": 95, "socSet": 900}, pack_data=PACK_1920WH)
+    low = make_client("LOW", report={"electricLevel": 20}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([full, low])
+
+    await aggregator.write_properties({"inputLimit": 100})
+
+    assert full.written == {"inputLimit": 0.0}
+    assert low.written == {"inputLimit": 100.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_reads_min_soc_and_soc_set_as_tenths_of_a_percent() -> None:
+    # Real device values: electricLevel=65, minSoc=100 (10%), socSet=800 (80%).
+    # A naive direct comparison against electricLevel would wrongly treat
+    # minSoc/socSet as already being on a 0-100 percent scale.
+    device = make_client(
+        "REAL", report={"electricLevel": 65, "minSoc": 100, "socSet": 800}, pack_data=PACK_1920WH
+    )
+    aggregator = Aggregator([device])
+
+    await aggregator.write_properties({"outputLimit": 100})
+    assert device.written == {"outputLimit": 100.0}
+
+    await aggregator.write_properties({"inputLimit": 100})
+    assert device.written == {"inputLimit": 100.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_falls_back_to_even_split_when_state_unknown() -> None:
+    a = make_client("A", report={})
+    b = make_client("B", report={})
+    aggregator = Aggregator([a, b])
+
+    await aggregator.write_properties({"outputLimit": 100})
+
+    assert a.written == {"outputLimit": 50.0}
+    assert b.written == {"outputLimit": 50.0}
 
 
 @pytest.mark.asyncio
 async def test_write_properties_skips_unreachable_devices() -> None:
-    ok = make_client("OK1")
+    ok = make_client("OK1", report={"electricLevel": 50}, pack_data=PACK_1920WH)
     broken = make_client("BROKEN1", fail=True)
     aggregator = Aggregator([ok, broken])
 
     await aggregator.write_properties({"outputLimit": 100})
 
-    assert ok.written == {"outputLimit": 50}
+    assert ok.written == {"outputLimit": 100.0}

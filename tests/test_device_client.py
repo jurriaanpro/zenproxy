@@ -28,6 +28,26 @@ async def test_get_report_returns_properties_and_caches_sn() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_get_report_caches_pack_data() -> None:
+    respx.get("http://10.0.0.5:80/properties/report").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sn": "ABC123",
+                "properties": {},
+                "packData": [{"sn": "PACK1", "packType": 70}],
+            },
+        )
+    )
+    async with httpx.AsyncClient() as http_client:
+        client = DeviceClient(DEVICE, http_client)
+        await client.get_report()
+
+    assert client.pack_data == [{"sn": "PACK1", "packType": 70}]
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_write_properties_resolves_sn_via_report_first() -> None:
     respx.get("http://10.0.0.5:80/properties/report").mock(
         return_value=httpx.Response(200, json={"sn": "ABC123", "properties": {}})
