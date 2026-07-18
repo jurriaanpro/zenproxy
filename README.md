@@ -12,7 +12,8 @@ uv run zenproxy --config config.yaml
 ```
 
 Copy [`config.example.yaml`](config.example.yaml) to `config.yaml` and fill in
-the serial number and host of each real device.
+the host of each real device. Serial numbers are learned automatically from
+each device's `/properties/report` response — no need to specify them.
 
 ## Development
 
