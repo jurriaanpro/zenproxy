@@ -1,6 +1,7 @@
 from typing import Any
 
 import httpx
+from loguru import logger
 
 from zenproxy.config import RealDevice
 
@@ -27,6 +28,8 @@ class DeviceClient:
         response.raise_for_status()
         body: dict[str, Any] = response.json()
         if "sn" in body:
+            if self.sn is None:
+                logger.info("device at {} identified as sn {}", self._base_url(), body["sn"])
             self.sn = body["sn"]
         self.pack_data = body.get("packData", [])
         properties: Properties = body.get("properties", body)

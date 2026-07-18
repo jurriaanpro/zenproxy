@@ -1,10 +1,9 @@
 import asyncio
-import logging
 from typing import Any
 
-from zenproxy.device_client import DeviceClient, Properties
+from loguru import logger
 
-logger = logging.getLogger(__name__)
+from zenproxy.device_client import DeviceClient, Properties
 
 # Properties that represent a power flow, a combined limit, or a count:
 # summing across devices gives the virtual device's total, matching what a
@@ -205,7 +204,7 @@ class Aggregator:
         reports: dict[str, Properties] = {}
         for client, result in zip(self.clients, results, strict=True):
             if isinstance(result, BaseException):
-                logger.warning("device %s unreachable: %s", client.label, result)
+                logger.warning("device {} unreachable: {}", client.label, result)
                 continue
             reports[client.label] = result
         return reports
@@ -215,6 +214,8 @@ class Aggregator:
         return _aggregate_properties(self.clients, states), _merged_pack_data(states)
 
     async def write_properties(self, properties: Properties) -> None:
+        logger.info("write requested: {}", properties)
+
         per_device: dict[DeviceClient, Properties] = {
             client: dict(properties) for client in self.clients
         }
@@ -237,7 +238,9 @@ class Aggregator:
         )
         for client, result in zip(self.clients, results, strict=True):
             if isinstance(result, BaseException):
-                logger.warning("device %s write failed: %s", client.label, result)
+                logger.warning("device {} write failed: {}", client.label, result)
+            else:
+                logger.info("device {} write ok: {}", client.label, per_device[client])
 
     async def _gather_states(self) -> dict[DeviceClient, Properties]:
         results = await asyncio.gather(
@@ -247,7 +250,7 @@ class Aggregator:
         states: dict[DeviceClient, Properties] = {}
         for client, result in zip(self.clients, results, strict=True):
             if isinstance(result, BaseException):
-                logger.warning("device %s unreachable: %s", client.label, result)
+                logger.warning("device {} unreachable: {}", client.label, result)
                 continue
             states[client] = result
         return states
@@ -277,6 +280,13 @@ class Aggregator:
                 if not isinstance(raw_soc_set, int | float):
                     continue
                 if electric_level >= raw_soc_set / SOC_SCALE:
+                    logger.info(
+                        "device {} excluded from {}: electricLevel {} >= socSet {}",
+                        client.label,
+                        property_name,
+                        electric_level,
+                        raw_soc_set / SOC_SCALE,
+                    )
                     continue
                 headroom = (100 - electric_level) / 100
             else:
@@ -284,6 +294,13 @@ class Aggregator:
                 if not isinstance(raw_min_soc, int | float):
                     continue
                 if electric_level <= raw_min_soc / SOC_SCALE:
+                    logger.info(
+                        "device {} excluded from {}: electricLevel {} <= minSoc {}",
+                        client.label,
+                        property_name,
+                        electric_level,
+                        raw_min_soc / SOC_SCALE,
+                    )
                     continue
                 headroom = electric_level / 100
 
@@ -296,6 +313,11 @@ class Aggregator:
         total_weight = sum(weights.values())
         if total_weight <= 0:
             share = total / len(self.clients)
+            logger.info(
+                "{} split: no device state/headroom available, falling back to even split of {}",
+                property_name,
+                total,
+            )
             for client in self.clients:
                 per_device[client][property_name] = share
             return
@@ -304,10 +326,16 @@ class Aggregator:
         distributed = sum(shares.values())
         if distributed < total - 1e-6:
             logger.warning(
-                "%s request of %s exceeds combined device capacity; only %s distributed",
+                "{} request of {} exceeds combined device capacity; only {} distributed",
                 property_name,
                 total,
                 distributed,
             )
+        logger.info(
+            "{} split of {}: {}",
+            property_name,
+            total,
+            {client.label: shares.get(client, 0.0) for client in self.clients},
+        )
         for client in self.clients:
             per_device[client][property_name] = shares.get(client, 0.0)
