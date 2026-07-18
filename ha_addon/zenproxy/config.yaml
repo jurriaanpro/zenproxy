@@ -1,0 +1,26 @@
+name: zenproxy
+version: "0.1.0"
+slug: zenproxy
+description: Unifies one or more Zendure home battery devices behind a single virtual device API
+url: https://github.com/jurriaanpro/zenproxy
+arch:
+  - amd64
+startup: application
+boot: auto
+init: false
+ports:
+  8080/tcp: 8080
+ports_description:
+  8080/tcp: zenproxy HTTP API
+options:
+  virtual_sn: ZENPROXY000001
+  port: 8080
+  devices:
+    - host: 192.168.1.101
+      port: 80
+schema:
+  virtual_sn: str
+  port: int
+  devices:
+    - host: str
+      port: int
