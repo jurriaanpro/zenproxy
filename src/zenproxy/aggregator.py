@@ -51,6 +51,20 @@ _HANDLED_PROPERTIES = (
 OUTPUT_SPLIT_PROPERTY = "outputLimit"
 INPUT_SPLIT_PROPERTY = "inputLimit"
 
+# These are hardware ceilings rather than live power flow, but still split
+# using the same SoC-weighted headroom as outputLimit/inputLimit: a device
+# already at its socSet/minSoc floor contributes no weight, so its sibling
+# can claim the full ceiling instead of a static, unusable half. Splitting
+# them at all (rather than broadcasting the total to every device) keeps the
+# aggregated read-back equal to what was written -- confirmed against real
+# hardware: broadcasting caused the read-back sum to double the requested
+# total, which kept a control-loop automation retrying indefinitely. And
+# splitting evenly by capacity alone (ignoring SoC) reintroduced a milder
+# version of the same problem: an excluded device still hogged half the
+# ceiling that only its sibling could actually use.
+CHARGE_CAP_PROPERTY = "chargeMaxLimit"
+DISCHARGE_CAP_PROPERTY = "inverseMaxPower"
+
 DEFAULT_MIN_SOC = 0
 DEFAULT_SOC_SET = 100
 
@@ -220,7 +234,12 @@ class Aggregator:
             client: dict(properties) for client in self.clients
         }
 
-        needs_state = OUTPUT_SPLIT_PROPERTY in properties or INPUT_SPLIT_PROPERTY in properties
+        needs_state = (
+            OUTPUT_SPLIT_PROPERTY in properties
+            or INPUT_SPLIT_PROPERTY in properties
+            or CHARGE_CAP_PROPERTY in properties
+            or DISCHARGE_CAP_PROPERTY in properties
+        )
         if needs_state and self.clients:
             states = await self._gather_states()
             if OUTPUT_SPLIT_PROPERTY in properties:
@@ -231,6 +250,16 @@ class Aggregator:
                 total = properties[INPUT_SPLIT_PROPERTY]
                 assert isinstance(total, int | float)
                 self._apply_split(total, states, per_device, INPUT_SPLIT_PROPERTY, charging=True)
+            if CHARGE_CAP_PROPERTY in properties:
+                total = properties[CHARGE_CAP_PROPERTY]
+                assert isinstance(total, int | float)
+                self._apply_cap_split(total, states, per_device, CHARGE_CAP_PROPERTY, charging=True)
+            if DISCHARGE_CAP_PROPERTY in properties:
+                total = properties[DISCHARGE_CAP_PROPERTY]
+                assert isinstance(total, int | float)
+                self._apply_cap_split(
+                    total, states, per_device, DISCHARGE_CAP_PROPERTY, charging=False
+                )
 
         results = await asyncio.gather(
             *(client.write_properties(per_device[client]) for client in self.clients),
@@ -261,18 +290,15 @@ class Aggregator:
             states[client] = result
         return states
 
-    def _apply_split(
+    def _soc_weighted_headroom(
         self,
-        total: float,
         states: dict[DeviceClient, Properties],
-        per_device: dict[DeviceClient, Properties],
         property_name: str,
         *,
         charging: bool,
-    ) -> None:
-        cap_property = "chargeMaxLimit" if charging else "inverseMaxPower"
+    ) -> dict[DeviceClient, float]:
+        """Capacity-weighted headroom per device, excluding those at their SoC floor/ceiling."""
         weights: dict[DeviceClient, float] = {}
-        caps: dict[DeviceClient, float] = {}
         for client in self.clients:
             state = states.get(client)
             if state is None:
@@ -313,8 +339,24 @@ class Aggregator:
             weight = headroom * _device_capacity_wh(client)
             if weight > 0:
                 weights[client] = weight
-                cap = state.get(cap_property)
-                caps[client] = cap if isinstance(cap, int | float) and cap >= 0 else float("inf")
+        return weights
+
+    def _apply_split(
+        self,
+        total: float,
+        states: dict[DeviceClient, Properties],
+        per_device: dict[DeviceClient, Properties],
+        property_name: str,
+        *,
+        charging: bool,
+    ) -> None:
+        cap_property = "chargeMaxLimit" if charging else "inverseMaxPower"
+        weights = self._soc_weighted_headroom(states, property_name, charging=charging)
+        caps: dict[DeviceClient, float] = {}
+        for client in weights:
+            state = states[client]
+            cap = state.get(cap_property)
+            caps[client] = cap if isinstance(cap, int | float) and cap >= 0 else float("inf")
 
         total_weight = sum(weights.values())
         if total_weight <= 0:
@@ -342,6 +384,43 @@ class Aggregator:
             property_name,
             total,
             {client.label: shares.get(client, 0.0) for client in self.clients},
+        )
+        for client in self.clients:
+            per_device[client][property_name] = shares.get(client, 0.0)
+
+    def _apply_cap_split(
+        self,
+        total: float,
+        states: dict[DeviceClient, Properties],
+        per_device: dict[DeviceClient, Properties],
+        property_name: str,
+        *,
+        charging: bool,
+    ) -> None:
+        """Split a chargeMaxLimit/inverseMaxPower write the same way as the matching power
+        flow (outputLimit/inputLimit): weighted by SoC headroom and capacity, excluding
+        devices at their floor/ceiling. Unlike the flow split, there's no further cap to
+        water-fill against here -- these fields *are* the ceiling.
+        """
+        weights = self._soc_weighted_headroom(states, property_name, charging=charging)
+        total_weight = sum(weights.values())
+        if total_weight <= 0:
+            share = total / len(self.clients)
+            logger.info(
+                "{} split: no device state/headroom available, falling back to even split of {}",
+                property_name,
+                total,
+            )
+            for client in self.clients:
+                per_device[client][property_name] = share
+            return
+
+        shares = {client: total * weight / total_weight for client, weight in weights.items()}
+        logger.info(
+            "{} split of {}: {}",
+            property_name,
+            total,
+            {client.label: share for client, share in shares.items()},
         )
         for client in self.clients:
             per_device[client][property_name] = shares.get(client, 0.0)

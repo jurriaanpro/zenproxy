@@ -7,6 +7,7 @@ from zenproxy.config import RealDevice
 from zenproxy.device_client import DeviceClient, Properties
 
 PACK_1920WH = [{"packType": 70}]
+PACK_960WH = [{"packType": 250}]
 
 
 class FakeDeviceClient(DeviceClient):
@@ -327,3 +328,54 @@ async def test_write_properties_returns_false_when_a_device_reports_failure() ->
     success = await aggregator.write_properties({"acMode": 2})
 
     assert success is False
+
+
+@pytest.mark.asyncio
+async def test_write_properties_splits_charge_max_limit_evenly_by_equal_capacity() -> None:
+    a = make_client("A", pack_data=PACK_1920WH)
+    b = make_client("B", pack_data=PACK_1920WH)
+    aggregator = Aggregator([a, b])
+
+    await aggregator.write_properties({"chargeMaxLimit": 800})
+
+    assert a.written == {"chargeMaxLimit": 400.0}
+    assert b.written == {"chargeMaxLimit": 400.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_splits_inverse_max_power_proportional_to_capacity() -> None:
+    small = make_client("SMALL", report={"electricLevel": 50}, pack_data=PACK_960WH)
+    large = make_client("LARGE", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([small, large])
+
+    await aggregator.write_properties({"inverseMaxPower": 900})
+
+    assert small.written == {"inverseMaxPower": 300.0}
+    assert large.written == {"inverseMaxPower": 600.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_cap_split_excludes_device_at_soc_limit() -> None:
+    # Real-hardware scenario: a device that has already reached its socSet
+    # target must not keep half the charge ceiling to itself -- its sibling,
+    # which still has headroom, should be able to claim the full total.
+    full = make_client("FULL", report={"electricLevel": 100}, pack_data=PACK_1920WH)
+    empty = make_client("EMPTY", report={"electricLevel": 0}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([full, empty])
+
+    await aggregator.write_properties({"chargeMaxLimit": 800})
+
+    assert full.written == {"chargeMaxLimit": 0.0}
+    assert empty.written == {"chargeMaxLimit": 800.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_falls_back_to_even_split_for_cap_when_capacity_unknown() -> None:
+    a = make_client("A")
+    b = make_client("B")
+    aggregator = Aggregator([a, b])
+
+    await aggregator.write_properties({"inverseMaxPower": 800})
+
+    assert a.written == {"inverseMaxPower": 400.0}
+    assert b.written == {"inverseMaxPower": 400.0}
