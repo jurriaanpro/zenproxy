@@ -135,6 +135,46 @@ async def test_write_properties_reads_min_soc_and_soc_set_as_tenths_of_a_percent
 
 
 @pytest.mark.asyncio
+async def test_write_properties_caps_output_at_inverse_max_power_and_redistributes() -> None:
+    capped = make_client(
+        "CAPPED", report={"electricLevel": 50, "inverseMaxPower": 30}, pack_data=PACK_1920WH
+    )
+    open_ended = make_client("OPEN", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([capped, open_ended])
+
+    await aggregator.write_properties({"outputLimit": 100})
+
+    assert capped.written == {"outputLimit": 30.0}
+    assert open_ended.written == {"outputLimit": 70.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_caps_input_at_charge_max_limit_and_redistributes() -> None:
+    capped = make_client(
+        "CAPPED", report={"electricLevel": 20, "chargeMaxLimit": 40}, pack_data=PACK_1920WH
+    )
+    open_ended = make_client("OPEN", report={"electricLevel": 20}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([capped, open_ended])
+
+    await aggregator.write_properties({"inputLimit": 100})
+
+    assert capped.written == {"inputLimit": 40.0}
+    assert open_ended.written == {"inputLimit": 60.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_leaves_shortfall_when_combined_caps_are_insufficient() -> None:
+    a = make_client("A", report={"electricLevel": 50, "inverseMaxPower": 30}, pack_data=PACK_1920WH)
+    b = make_client("B", report={"electricLevel": 50, "inverseMaxPower": 30}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([a, b])
+
+    await aggregator.write_properties({"outputLimit": 100})
+
+    assert a.written == {"outputLimit": 30.0}
+    assert b.written == {"outputLimit": 30.0}
+
+
+@pytest.mark.asyncio
 async def test_write_properties_falls_back_to_even_split_when_state_unknown() -> None:
     a = make_client("A", report={})
     b = make_client("B", report={})

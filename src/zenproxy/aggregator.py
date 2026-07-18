@@ -39,6 +39,43 @@ def _device_capacity_wh(client: DeviceClient) -> float:
     return capacity
 
 
+def _distribute_with_caps(
+    total: float,
+    weights: dict[DeviceClient, float],
+    caps: dict[DeviceClient, float],
+) -> dict[DeviceClient, float]:
+    """Proportional split of `total` by `weights`, without exceeding each client's cap.
+
+    Any amount a capped client can't absorb is redistributed, proportionally,
+    among the remaining uncapped clients (water-filling).
+    """
+    free = dict(weights)
+    shares: dict[DeviceClient, float] = {}
+    remaining_total = total
+
+    while free:
+        weight_sum = sum(free.values())
+        if weight_sum <= 0:
+            break
+
+        overflowing = {
+            client: caps[client]
+            for client, weight in free.items()
+            if remaining_total * (weight / weight_sum) > caps[client]
+        }
+        if not overflowing:
+            for client, weight in free.items():
+                shares[client] = remaining_total * (weight / weight_sum)
+            break
+
+        for client, cap in overflowing.items():
+            shares[client] = cap
+            remaining_total -= cap
+            del free[client]
+
+    return shares
+
+
 class Aggregator:
     def __init__(self, clients: list[DeviceClient]) -> None:
         self.clients = clients
@@ -103,7 +140,9 @@ class Aggregator:
         *,
         charging: bool,
     ) -> None:
+        cap_property = "chargeMaxLimit" if charging else "inverseMaxPower"
         weights: dict[DeviceClient, float] = {}
+        caps: dict[DeviceClient, float] = {}
         for client in self.clients:
             state = states.get(client)
             if state is None:
@@ -130,6 +169,8 @@ class Aggregator:
             weight = headroom * _device_capacity_wh(client)
             if weight > 0:
                 weights[client] = weight
+                cap = state.get(cap_property)
+                caps[client] = cap if isinstance(cap, int | float) and cap >= 0 else float("inf")
 
         total_weight = sum(weights.values())
         if total_weight <= 0:
@@ -138,5 +179,14 @@ class Aggregator:
                 per_device[client][property_name] = share
             return
 
+        shares = _distribute_with_caps(total, weights, caps)
+        distributed = sum(shares.values())
+        if distributed < total - 1e-6:
+            logger.warning(
+                "%s request of %s exceeds combined device capacity; only %s distributed",
+                property_name,
+                total,
+                distributed,
+            )
         for client in self.clients:
-            per_device[client][property_name] = total * (weights.get(client, 0.0) / total_weight)
+            per_device[client][property_name] = shares.get(client, 0.0)
