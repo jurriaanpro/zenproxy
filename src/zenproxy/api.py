@@ -42,11 +42,11 @@ def create_app(config: AppConfig, http_client: httpx.AsyncClient | None = None) 
     @app.get("/properties/report")
     async def get_report() -> ReportResponse:
         devices = await aggregator.get_report()
-        return ReportResponse(sn=config.virtual_device.sn, devices=devices)
+        return ReportResponse(sn=config.virtual_sn, devices=devices)
 
     @app.post("/properties/write")
     async def write_properties(request: WriteRequest) -> WriteResponse:
         await aggregator.write_properties(request.properties)
-        return WriteResponse(sn=config.virtual_device.sn, properties=request.properties)
+        return WriteResponse(sn=config.virtual_sn, properties=request.properties)
 
     return app

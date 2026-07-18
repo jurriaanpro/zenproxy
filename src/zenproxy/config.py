@@ -10,11 +10,6 @@ class RealDevice(BaseModel):
     port: int = 80
 
 
-class VirtualDevice(BaseModel):
-    sn: str
-    model: str = "ZenProxy"
-
-
 class ServerSettings(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8080
@@ -22,7 +17,7 @@ class ServerSettings(BaseModel):
 
 
 class AppConfig(BaseModel):
-    virtual_device: VirtualDevice
+    virtual_sn: str
     devices: list[RealDevice]
     server: ServerSettings = ServerSettings()
 

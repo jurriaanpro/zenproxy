@@ -5,10 +5,10 @@ import respx
 from fastapi.testclient import TestClient
 
 from zenproxy.api import create_app
-from zenproxy.config import AppConfig, RealDevice, VirtualDevice
+from zenproxy.config import AppConfig, RealDevice
 
 CONFIG = AppConfig(
-    virtual_device=VirtualDevice(sn="VIRTUAL1"),
+    virtual_sn="VIRTUAL1",
     devices=[
         RealDevice(sn="DEV1", host="10.0.0.1", port=80),
         RealDevice(sn="DEV2", host="10.0.0.2", port=80),

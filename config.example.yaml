@@ -1,6 +1,4 @@
-virtual_device:
-  sn: ZENPROXY000001
-  model: ZenProxy
+virtual_sn: ZENPROXY000001
 
 devices:
   - sn: WOB1NHMAMXXXXX1
