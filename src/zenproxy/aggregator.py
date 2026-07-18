@@ -1,9 +1,34 @@
 import asyncio
 import logging
+from typing import Any
 
 from zenproxy.device_client import DeviceClient, Properties
 
 logger = logging.getLogger(__name__)
+
+# Properties that represent a power flow or a combined limit: summing across
+# devices gives the virtual device's total, matching what a real device
+# would report for its own combined pack output.
+SUM_PROPERTIES = frozenset(
+    {
+        "outputHomePower",
+        "outputPackPower",
+        "packInputPower",
+        "gridInputPower",
+        "solarInputPower",
+        "solarPower1",
+        "solarPower2",
+        "outputLimit",
+        "inputLimit",
+        "inverseMaxPower",
+        "chargeMaxLimit",
+    }
+)
+
+# Properties that represent a state of charge: averaged, weighted by each
+# device's capacity, so a small nearly-full device doesn't skew the result
+# as much as a large one.
+CAPACITY_WEIGHTED_AVERAGE_PROPERTIES = frozenset({"electricLevel"})
 
 OUTPUT_SPLIT_PROPERTY = "outputLimit"
 INPUT_SPLIT_PROPERTY = "inputLimit"
@@ -37,6 +62,39 @@ def _device_capacity_wh(client: DeviceClient) -> float:
         if isinstance(pack_type, int):
             capacity += PACK_CAPACITY_WH.get(pack_type, 0.0)
     return capacity
+
+
+def _aggregate_properties(states: dict[DeviceClient, Properties]) -> Properties:
+    aggregated: Properties = {}
+
+    for name in SUM_PROPERTIES:
+        numeric_values = [
+            value for state in states.values() if isinstance(value := state.get(name), int | float)
+        ]
+        if numeric_values:
+            aggregated[name] = sum(numeric_values)
+
+    for name in CAPACITY_WEIGHTED_AVERAGE_PROPERTIES:
+        weighted_sum = 0.0
+        weight_total = 0.0
+        for client, state in states.items():
+            value = state.get(name)
+            if not isinstance(value, int | float):
+                continue
+            weight = _device_capacity_wh(client) or 1.0
+            weighted_sum += value * weight
+            weight_total += weight
+        if weight_total > 0:
+            aggregated[name] = weighted_sum / weight_total
+
+    return aggregated
+
+
+def _merged_pack_data(states: dict[DeviceClient, Properties]) -> list[dict[str, Any]]:
+    pack_data: list[dict[str, Any]] = []
+    for client in states:
+        pack_data.extend(client.pack_data)
+    return pack_data
 
 
 def _distribute_with_caps(
@@ -92,6 +150,10 @@ class Aggregator:
                 continue
             reports[client.label] = result
         return reports
+
+    async def get_aggregated_report(self) -> tuple[Properties, list[dict[str, Any]]]:
+        states = await self._gather_states()
+        return _aggregate_properties(states), _merged_pack_data(states)
 
     async def write_properties(self, properties: Properties) -> None:
         per_device: dict[DeviceClient, Properties] = {

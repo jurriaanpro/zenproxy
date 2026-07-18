@@ -56,6 +56,36 @@ async def test_get_report_skips_unreachable_devices() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_aggregated_report_sums_power_and_weight_averages_soc() -> None:
+    pack_a = {"sn": "PACKA", "packType": 70}
+    pack_b = {"sn": "PACKB", "packType": 70}
+    a = make_client(
+        "A", report={"outputHomePower": 100, "electricLevel": 80}, pack_data=[pack_a]
+    )
+    b = make_client(
+        "B", report={"outputHomePower": 50, "electricLevel": 20}, pack_data=[pack_b]
+    )
+    aggregator = Aggregator([a, b])
+
+    properties, pack_data = await aggregator.get_aggregated_report()
+
+    assert properties == {"outputHomePower": 150, "electricLevel": 50.0}
+    assert pack_data == [pack_a, pack_b]
+
+
+@pytest.mark.asyncio
+async def test_get_aggregated_report_skips_unreachable_devices() -> None:
+    ok = make_client("OK", report={"outputHomePower": 100}, pack_data=PACK_1920WH)
+    broken = make_client("BROKEN", fail=True)
+    aggregator = Aggregator([ok, broken])
+
+    properties, pack_data = await aggregator.get_aggregated_report()
+
+    assert properties == {"outputHomePower": 100}
+    assert pack_data == PACK_1920WH
+
+
+@pytest.mark.asyncio
 async def test_write_properties_splits_output_limit_by_soc_and_capacity() -> None:
     a = make_client("A", report={"electricLevel": 80}, pack_data=PACK_1920WH)
     b = make_client("B", report={"electricLevel": 20}, pack_data=PACK_1920WH)

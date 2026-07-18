@@ -15,9 +15,46 @@ CONFIG = AppConfig(
     ],
 )
 
+PACK1 = {"sn": "PACK1", "packType": 70}
+PACK2 = {"sn": "PACK2", "packType": 70}
+
 
 @respx.mock
-def test_get_properties_report_returns_per_device_breakdown() -> None:
+def test_get_properties_report_returns_aggregated_properties() -> None:
+    respx.get("http://10.0.0.1:80/properties/report").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sn": "DEV1",
+                "properties": {"outputHomePower": 100, "electricLevel": 80},
+                "packData": [PACK1],
+            },
+        )
+    )
+    respx.get("http://10.0.0.2:80/properties/report").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sn": "DEV2",
+                "properties": {"outputHomePower": 50, "electricLevel": 20},
+                "packData": [PACK2],
+            },
+        )
+    )
+
+    with TestClient(create_app(CONFIG)) as test_client:
+        response = test_client.get("/properties/report")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "sn": "VIRTUAL1",
+        "properties": {"outputHomePower": 150, "electricLevel": 50.0},
+        "packData": [PACK1, PACK2],
+    }
+
+
+@respx.mock
+def test_get_devices_returns_raw_per_device_breakdown() -> None:
     respx.get("http://10.0.0.1:80/properties/report").mock(
         return_value=httpx.Response(
             200, json={"sn": "DEV1", "properties": {"outputHomePower": 100}}
@@ -30,7 +67,7 @@ def test_get_properties_report_returns_per_device_breakdown() -> None:
     )
 
     with TestClient(create_app(CONFIG)) as test_client:
-        response = test_client.get("/properties/report")
+        response = test_client.get("/devices")
 
     assert response.status_code == 200
     assert response.json() == {
