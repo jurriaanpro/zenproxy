@@ -213,7 +213,7 @@ class Aggregator:
         states = await self._gather_states()
         return _aggregate_properties(self.clients, states), _merged_pack_data(states)
 
-    async def write_properties(self, properties: Properties) -> None:
+    async def write_properties(self, properties: Properties) -> bool:
         logger.info("write requested: {}", properties)
 
         per_device: dict[DeviceClient, Properties] = {
@@ -236,11 +236,17 @@ class Aggregator:
             *(client.write_properties(per_device[client]) for client in self.clients),
             return_exceptions=True,
         )
+        all_ok = True
         for client, result in zip(self.clients, results, strict=True):
             if isinstance(result, BaseException):
                 logger.warning("device {} write failed: {}", client.label, result)
+                all_ok = False
+            elif not result.get("success", True):
+                logger.warning("device {} reported write failure: {}", client.label, result)
+                all_ok = False
             else:
                 logger.info("device {} write ok: {}", client.label, per_device[client])
+        return all_ok
 
     async def _gather_states(self) -> dict[DeviceClient, Properties]:
         results = await asyncio.gather(

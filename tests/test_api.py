@@ -88,10 +88,14 @@ def test_post_properties_write_splits_output_limit() -> None:
         return_value=httpx.Response(200, json={"sn": "DEV2", "properties": {}})
     )
     dev1_route = respx.post("http://10.0.0.1:80/properties/write").mock(
-        return_value=httpx.Response(200, json={})
+        return_value=httpx.Response(
+            200, json={"timestamp": 1, "messageId": 1, "success": True, "code": 200, "sn": "DEV1"}
+        )
     )
     dev2_route = respx.post("http://10.0.0.2:80/properties/write").mock(
-        return_value=httpx.Response(200, json={})
+        return_value=httpx.Response(
+            200, json={"timestamp": 1, "messageId": 1, "success": True, "code": 200, "sn": "DEV2"}
+        )
     )
 
     with TestClient(create_app(CONFIG)) as test_client:
@@ -101,7 +105,12 @@ def test_post_properties_write_splits_output_limit() -> None:
         )
 
     assert response.status_code == 200
-    assert response.json() == {"sn": "VIRTUAL1", "properties": {"outputLimit": 200}}
+    body = response.json()
+    assert body["sn"] == "VIRTUAL1"
+    assert body["success"] is True
+    assert body["code"] == 200
+    assert isinstance(body["timestamp"], int)
+    assert isinstance(body["messageId"], int)
     assert json.loads(dev1_route.calls.last.request.content) == {
         "sn": "DEV1",
         "properties": {"outputLimit": 100.0},

@@ -35,7 +35,7 @@ class DeviceClient:
         properties: Properties = body.get("properties", body)
         return properties
 
-    async def write_properties(self, properties: Properties) -> None:
+    async def write_properties(self, properties: Properties) -> dict[str, Any]:
         if self.sn is None:
             await self.get_report()
         if self.sn is None:
@@ -46,3 +46,5 @@ class DeviceClient:
             json={"sn": self.sn, "properties": properties},
         )
         response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        return result

@@ -16,12 +16,14 @@ class FakeDeviceClient(DeviceClient):
         report: Properties | None = None,
         fail: bool = False,
         pack_data: list[dict[str, Any]] | None = None,
+        write_result: dict[str, Any] | None = None,
     ) -> None:
         self.device = RealDevice(host="10.0.0.1")
         self.sn = sn
         self._report = report or {}
         self._fail = fail
         self.pack_data = pack_data or []
+        self._write_result = write_result or {"success": True, "code": 200}
         self.written: Properties | None = None
 
     async def get_report(self) -> Properties:
@@ -29,10 +31,11 @@ class FakeDeviceClient(DeviceClient):
             raise ConnectionError("device unreachable")
         return self._report
 
-    async def write_properties(self, properties: Properties) -> None:
+    async def write_properties(self, properties: Properties) -> dict[str, Any]:
         if self._fail:
             raise ConnectionError("device unreachable")
         self.written = properties
+        return self._write_result
 
 
 def make_client(
@@ -40,8 +43,11 @@ def make_client(
     report: Properties | None = None,
     fail: bool = False,
     pack_data: list[dict[str, Any]] | None = None,
+    write_result: dict[str, Any] | None = None,
 ) -> FakeDeviceClient:
-    return FakeDeviceClient(sn, report=report, fail=fail, pack_data=pack_data)
+    return FakeDeviceClient(
+        sn, report=report, fail=fail, pack_data=pack_data, write_result=write_result
+    )
 
 
 @pytest.mark.asyncio
@@ -283,3 +289,41 @@ async def test_write_properties_skips_unreachable_devices() -> None:
     await aggregator.write_properties({"outputLimit": 100})
 
     assert ok.written == {"outputLimit": 100.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_returns_true_when_all_devices_succeed() -> None:
+    a = make_client("A", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    b = make_client("B", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([a, b])
+
+    success = await aggregator.write_properties({"outputLimit": 100})
+
+    assert success is True
+
+
+@pytest.mark.asyncio
+async def test_write_properties_returns_false_when_a_device_is_unreachable() -> None:
+    ok = make_client("OK1", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    broken = make_client("BROKEN1", fail=True)
+    aggregator = Aggregator([ok, broken])
+
+    success = await aggregator.write_properties({"acMode": 2})
+
+    assert success is False
+
+
+@pytest.mark.asyncio
+async def test_write_properties_returns_false_when_a_device_reports_failure() -> None:
+    ok = make_client("OK1", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    rejected = make_client(
+        "REJECTED1",
+        report={"electricLevel": 50},
+        pack_data=PACK_1920WH,
+        write_result={"success": False, "code": 400},
+    )
+    aggregator = Aggregator([ok, rejected])
+
+    success = await aggregator.write_properties({"acMode": 2})
+
+    assert success is False
