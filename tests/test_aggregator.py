@@ -179,6 +179,43 @@ async def test_write_properties_concentrates_small_request_on_a_single_device() 
 
 
 @pytest.mark.asyncio
+async def test_write_properties_keeps_the_same_device_active_despite_small_soc_swings() -> None:
+    # A stays the leader (higher electricLevel) on the first call. Even once
+    # a bit of discharge nudges it just below B, it should keep discharging
+    # -- re-ranking by the tiniest SoC difference on every call is what
+    # caused both packs to drain in lockstep and the relay to flap.
+    a = make_client("A", report={"electricLevel": 50, "minSoc": 100}, pack_data=PACK_1920WH)
+    b = make_client("B", report={"electricLevel": 49, "minSoc": 100}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([a, b])
+
+    await aggregator.write_properties({"outputLimit": 100})
+    assert a.written == {"outputLimit": 100.0}
+    assert b.written == {"outputLimit": 0.0}
+
+    a._report["electricLevel"] = 48
+    await aggregator.write_properties({"outputLimit": 100})
+    assert a.written == {"outputLimit": 100.0}
+    assert b.written == {"outputLimit": 0.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_hands_off_once_the_active_device_hits_its_floor() -> None:
+    # Once A actually reaches its minSoc floor and is excluded, B takes over
+    # -- the hand-off happens on genuine exclusion, not a ranking swap.
+    a = make_client("A", report={"electricLevel": 50, "minSoc": 100}, pack_data=PACK_1920WH)
+    b = make_client("B", report={"electricLevel": 49, "minSoc": 100}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([a, b])
+
+    await aggregator.write_properties({"outputLimit": 100})
+    assert a.written == {"outputLimit": 100.0}
+
+    a._report["electricLevel"] = 10
+    await aggregator.write_properties({"outputLimit": 100})
+    assert a.written == {"outputLimit": 0.0}
+    assert b.written == {"outputLimit": 100.0}
+
+
+@pytest.mark.asyncio
 async def test_write_properties_evenly_divides_once_the_per_device_threshold_is_met() -> None:
     # 300W across 2 devices would be 150W each -- at, not below, the 200W
     # per-device minimum -- but A can only take 150W anyway (its own cap),

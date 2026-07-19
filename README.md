@@ -78,6 +78,16 @@ ran once at build time.
   regardless of the even-split threshold — a genuine capacity shortfall
   always takes precedence over avoiding a thin split. See
   `_priority_split()` in `src/zenproxy/aggregator.py`.
+- **Priority order is sticky, not re-ranked on every write.** Early testing
+  against real hardware showed that ranking devices by live SoC-weighted
+  headroom on every single write caused the active device to flip as soon
+  as its SoC dipped a hair below its sibling's — flapping the relay and
+  pulling both packs' SoC together instead of draining one before the next.
+  `Aggregator._stable_priority()` keeps the previous leader(s) in place as
+  long as they're still eligible at all, only re-ranking when a device
+  actually drops out (hits its floor/ceiling) or a new one becomes
+  eligible. This state lives in memory on the `Aggregator` instance and
+  resets on restart.
 - **Write responses mimic the real device's ack shape**, not an echo of the
   submitted properties: `{timestamp, messageId, success, code, sn}`. An
   earlier version echoed back `{"sn": ..., "properties": ...}`, which looked

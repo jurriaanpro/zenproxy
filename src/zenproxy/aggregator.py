@@ -217,20 +217,19 @@ def _distribute_with_caps(
 
 def _priority_split(
     total: float,
-    weights: dict[DeviceClient, float],
+    priority: list[DeviceClient],
     caps: dict[DeviceClient, float],
     per_device_min: float = PER_DEVICE_MIN_WATTS,
 ) -> dict[DeviceClient, float]:
     """Evenly split `total` across as many devices as keep each one's even share
     at or above `per_device_min`, water-filled against each device's own cap.
 
-    Devices are brought in, in priority order (highest SoC-weighted headroom
-    first), starting from the largest group size whose even share clears the
-    threshold. If that group's combined cap can't actually cover `total`, the
-    next-priority device is added regardless of the threshold -- a genuine
-    capacity shortfall always takes precedence over avoiding a thin split.
+    Devices are brought in, in the given `priority` order, starting from the
+    largest group size whose even share clears the threshold. If that group's
+    combined cap can't actually cover `total`, the next-priority device is
+    added regardless of the threshold -- a genuine capacity shortfall always
+    takes precedence over avoiding a thin split.
     """
-    priority = sorted(weights, key=lambda c: weights[c], reverse=True)
     n = len(priority)
     if n == 0 or total <= 0:
         return {}
@@ -251,6 +250,15 @@ def _priority_split(
 class Aggregator:
     def __init__(self, clients: list[DeviceClient]) -> None:
         self.clients = clients
+        # Which device leads a charge/discharge split, kept sticky across
+        # calls (keyed by charging direction) so that whichever device is
+        # currently active keeps draining/charging until it's actually
+        # excluded (hits its floor/ceiling), rather than handing off to
+        # whichever device has marginally more headroom on every single
+        # write -- that flapped devices on and off in lockstep and kept
+        # both packs converging on the same SoC instead of one depleting
+        # before the next kicks in.
+        self._priority_order: dict[bool, list[DeviceClient]] = {}
 
     async def get_report(self) -> dict[str, Properties]:
         results = await asyncio.gather(
@@ -383,6 +391,29 @@ class Aggregator:
                 weights[client] = weight
         return weights
 
+    def _stable_priority(
+        self, charging: bool, weights: dict[DeviceClient, float]
+    ) -> list[DeviceClient]:
+        """Order eligible devices for a split, keeping the previous leader(s) in
+        place as long as they're still eligible.
+
+        Devices that dropped out of `weights` (hit their floor/ceiling) are
+        dropped from the order too; newly-eligible devices are appended,
+        ranked by current SoC-weighted headroom. This is what makes the split
+        "drain one device, then the next" instead of re-ranking by the
+        tiniest SoC difference on every call.
+        """
+        previous = self._priority_order.get(charging, [])
+        kept = [client for client in previous if client in weights]
+        newcomers = sorted(
+            (client for client in weights if client not in kept),
+            key=lambda c: weights[c],
+            reverse=True,
+        )
+        order = kept + newcomers
+        self._priority_order[charging] = order
+        return order
+
     def _apply_split(
         self,
         total: float,
@@ -412,7 +443,8 @@ class Aggregator:
                 per_device[client][property_name] = share
             return
 
-        shares = _priority_split(total, weights, caps)
+        priority = self._stable_priority(charging, weights)
+        shares = _priority_split(total, priority, caps)
         distributed = sum(shares.values())
         if distributed < total - 1e-6:
             logger.warning(
@@ -440,13 +472,14 @@ class Aggregator:
         charging: bool,
     ) -> None:
         """Split a chargeMaxLimit/inverseMaxPower write the same way as the matching power
-        flow (outputLimit/inputLimit): prioritized by SoC headroom and capacity, excluding
-        devices at their floor/ceiling, and concentrated on as few devices as possible
-        (see `_priority_split`) rather than spread thin across all of them. Unlike the
-        flow split, there's no further per-device cap to fill against here -- these
-        fields *are* the ceiling -- so a device either gets the full remaining total or
-        nothing. Note a device zeroed out this way isn't locked out permanently: it's
-        only until the next chargeMaxLimit/inverseMaxPower write recomputes the split.
+        flow (outputLimit/inputLimit): a sticky priority order (see `_stable_priority`),
+        excluding devices at their floor/ceiling, evenly split once the group's per-device
+        share clears `PER_DEVICE_MIN_WATTS` (see `_priority_split`) rather than spread thin
+        across all of them. Unlike the flow split, there's no further per-device cap to fill
+        against here -- these fields *are* the ceiling -- so within the active group a device
+        either gets its even share of the total or nothing. Note a device zeroed out this way
+        isn't locked out permanently: it's only until it's excluded by `_soc_weighted_headroom`
+        or the sticky order hands off to it.
         """
         weights = self._soc_weighted_headroom(states, property_name, charging=charging)
         total_weight = sum(weights.values())
@@ -462,7 +495,8 @@ class Aggregator:
             return
 
         caps = dict.fromkeys(weights, float("inf"))
-        shares = _priority_split(total, weights, caps)
+        priority = self._stable_priority(charging, weights)
+        shares = _priority_split(total, priority, caps)
         logger.info(
             "{} split of {}: {}",
             property_name,
