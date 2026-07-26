@@ -216,6 +216,31 @@ async def test_write_properties_hands_off_once_the_active_device_hits_its_floor(
 
 
 @pytest.mark.asyncio
+async def test_write_properties_sends_full_total_to_sole_eligible_device_ignoring_stale_cap() -> (
+    None
+):
+    # When A is excluded (at socSet), B should receive the full requested total
+    # even if its chargeMaxLimit is stale (written as a fraction when both devices
+    # were eligible). The excluded device's cap share is redistributed to B.
+    a = make_client(
+        "A",
+        report={"electricLevel": 80, "socSet": 800, "chargeMaxLimit": 600},
+        pack_data=PACK_1920WH,
+    )
+    b = make_client(
+        "B",
+        report={"electricLevel": 50, "socSet": 800, "chargeMaxLimit": 600},
+        pack_data=PACK_1920WH,
+    )
+    aggregator = Aggregator([a, b])
+
+    # A is at its socSet ceiling -- excluded from charging split.
+    await aggregator.write_properties({"inputLimit": 1200})
+    assert a.written == {"inputLimit": 0.0}
+    assert b.written == {"inputLimit": 1200.0}  # full total, not capped at stale 600
+
+
+@pytest.mark.asyncio
 async def test_write_properties_evenly_divides_once_the_per_device_threshold_is_met() -> None:
     # 300W across 2 devices would be 150W each -- at, not below, the 200W
     # per-device minimum -- but A can only take 150W anyway (its own cap),

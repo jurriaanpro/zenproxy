@@ -425,11 +425,32 @@ class Aggregator:
     ) -> None:
         cap_property = "chargeMaxLimit" if charging else "inverseMaxPower"
         weights = self._soc_weighted_headroom(states, property_name, charging=charging)
+
+        # Read each client's cap from device state.
+        raw_caps: dict[DeviceClient, float] = {}
+        for client in self.clients:
+            state = states.get(client)
+            if state is None:
+                continue
+            cap = state.get(cap_property)
+            raw_caps[client] = cap if isinstance(cap, int | float) and cap >= 0 else float("inf")
+
+        # When some devices are excluded their previously-split cap fractions are
+        # no longer in use. Redistribute those fractions proportionally among the
+        # eligible devices so a sole eligible device isn't limited to the stale
+        # half it was assigned when both devices were active.
+        excluded = [c for c in self.clients if c not in weights and c in raw_caps]
+        excluded_cap = sum(raw_caps[c] for c in excluded if raw_caps[c] != float("inf"))
+        eligible_cap_total = sum(
+            v for c in weights if (v := raw_caps.get(c, float("inf"))) != float("inf")
+        )
         caps: dict[DeviceClient, float] = {}
         for client in weights:
-            state = states[client]
-            cap = state.get(cap_property)
-            caps[client] = cap if isinstance(cap, int | float) and cap >= 0 else float("inf")
+            own = raw_caps.get(client, float("inf"))
+            if own == float("inf") or eligible_cap_total == 0:
+                caps[client] = float("inf")
+            else:
+                caps[client] = own + excluded_cap * (own / eligible_cap_total)
 
         total_weight = sum(weights.values())
         if total_weight <= 0:
