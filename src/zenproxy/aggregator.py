@@ -51,17 +51,14 @@ _HANDLED_PROPERTIES = (
 OUTPUT_SPLIT_PROPERTY = "outputLimit"
 INPUT_SPLIT_PROPERTY = "inputLimit"
 
-# These are hardware ceilings rather than live power flow, but still split
-# using the same SoC-weighted headroom as outputLimit/inputLimit: a device
-# already at its socSet/minSoc floor contributes no weight, so its sibling
-# can claim the full ceiling instead of a static, unusable half. Splitting
-# them at all (rather than broadcasting the total to every device) keeps the
-# aggregated read-back equal to what was written -- confirmed against real
-# hardware: broadcasting caused the read-back sum to double the requested
-# total, which kept a control-loop automation retrying indefinitely. And
-# splitting evenly by capacity alone (ignoring SoC) reintroduced a milder
-# version of the same problem: an excluded device still hogged half the
-# ceiling that only its sibling could actually use.
+# These are hardware ceilings rather than live power flow. They're split
+# with a plain even share (total / device count) across every configured
+# device, regardless of SoC state. Splitting them at all -- rather than
+# broadcasting the total to every device -- keeps the aggregated read-back
+# equal to what was written: SUM_PROPERTIES sums n * (total / n) back to
+# total. Confirmed against real hardware: broadcasting the unmodified total
+# to every device instead caused the read-back sum to double the requested
+# total, which kept a control-loop automation retrying indefinitely.
 CHARGE_CAP_PROPERTY = "chargeMaxLimit"
 DISCHARGE_CAP_PROPERTY = "inverseMaxPower"
 
@@ -284,12 +281,7 @@ class Aggregator:
             client: dict(properties) for client in self.clients
         }
 
-        needs_state = (
-            OUTPUT_SPLIT_PROPERTY in properties
-            or INPUT_SPLIT_PROPERTY in properties
-            or CHARGE_CAP_PROPERTY in properties
-            or DISCHARGE_CAP_PROPERTY in properties
-        )
+        needs_state = OUTPUT_SPLIT_PROPERTY in properties or INPUT_SPLIT_PROPERTY in properties
         if needs_state and self.clients:
             states = await self._gather_states()
             if OUTPUT_SPLIT_PROPERTY in properties:
@@ -300,16 +292,15 @@ class Aggregator:
                 total = properties[INPUT_SPLIT_PROPERTY]
                 assert isinstance(total, int | float)
                 self._apply_split(total, states, per_device, INPUT_SPLIT_PROPERTY, charging=True)
-            if CHARGE_CAP_PROPERTY in properties:
-                total = properties[CHARGE_CAP_PROPERTY]
-                assert isinstance(total, int | float)
-                self._apply_cap_split(total, states, per_device, CHARGE_CAP_PROPERTY, charging=True)
-            if DISCHARGE_CAP_PROPERTY in properties:
-                total = properties[DISCHARGE_CAP_PROPERTY]
-                assert isinstance(total, int | float)
-                self._apply_cap_split(
-                    total, states, per_device, DISCHARGE_CAP_PROPERTY, charging=False
-                )
+
+        if CHARGE_CAP_PROPERTY in properties and self.clients:
+            total = properties[CHARGE_CAP_PROPERTY]
+            assert isinstance(total, int | float)
+            self._apply_cap_split(total, per_device, CHARGE_CAP_PROPERTY)
+        if DISCHARGE_CAP_PROPERTY in properties and self.clients:
+            total = properties[DISCHARGE_CAP_PROPERTY]
+            assert isinstance(total, int | float)
+            self._apply_cap_split(total, per_device, DISCHARGE_CAP_PROPERTY)
 
         results = await asyncio.gather(
             *(client.write_properties(per_device[client]) for client in self.clients),
@@ -486,43 +477,21 @@ class Aggregator:
     def _apply_cap_split(
         self,
         total: float,
-        states: dict[DeviceClient, Properties],
         per_device: dict[DeviceClient, Properties],
         property_name: str,
-        *,
-        charging: bool,
     ) -> None:
-        """Split a chargeMaxLimit/inverseMaxPower write the same way as the matching power
-        flow (outputLimit/inputLimit): a sticky priority order (see `_stable_priority`),
-        excluding devices at their floor/ceiling, evenly split once the group's per-device
-        share clears `PER_DEVICE_MIN_WATTS` (see `_priority_split`) rather than spread thin
-        across all of them. Unlike the flow split, there's no further per-device cap to fill
-        against here -- these fields *are* the ceiling -- so within the active group a device
-        either gets its even share of the total or nothing. Note a device zeroed out this way
-        isn't locked out permanently: it's only until it's excluded by `_soc_weighted_headroom`
-        or the sticky order hands off to it.
+        """Split a chargeMaxLimit/inverseMaxPower write evenly across every configured
+        device, regardless of SoC state. The aggregated read-back sums these fields
+        (SUM_PROPERTIES), so an even split of n * (total / n) always reports back the
+        requested total.
         """
-        weights = self._soc_weighted_headroom(states, property_name, charging=charging)
-        total_weight = sum(weights.values())
-        if total_weight <= 0:
-            share = total / len(self.clients)
-            logger.info(
-                "{} split: no device state/headroom available, falling back to even split of {}",
-                property_name,
-                total,
-            )
-            for client in self.clients:
-                per_device[client][property_name] = share
-            return
-
-        caps = dict.fromkeys(weights, float("inf"))
-        priority = self._stable_priority(charging, weights)
-        shares = _priority_split(total, priority, caps)
+        share = total / len(self.clients)
         logger.info(
-            "{} split of {}: {}",
+            "{} split of {}: {} per device across {} devices",
             property_name,
             total,
-            {client.label: share for client, share in shares.items()},
+            share,
+            len(self.clients),
         )
         for client in self.clients:
-            per_device[client][property_name] = shares.get(client, 0.0)
+            per_device[client][property_name] = share

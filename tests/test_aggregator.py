@@ -498,12 +498,10 @@ async def test_write_properties_splits_charge_max_limit_evenly_by_equal_capacity
 
 
 @pytest.mark.asyncio
-async def test_write_properties_splits_inverse_max_power_evenly_once_threshold_is_met() -> None:
-    # 900W clears the 2-device even-split threshold (900/2 > 200), so both
-    # participate -- LARGE's greater capacity-weighted headroom only
-    # affects priority ordering (irrelevant here, since both are used), not
-    # the amount each receives: this ceiling field has no per-device cap, so
-    # the split is a plain 450/450 regardless of capacity.
+async def test_write_properties_splits_inverse_max_power_evenly_regardless_of_capacity() -> None:
+    # These ceiling fields have no per-device cap and no SoC weighting -- the
+    # split is a plain total/n regardless of capacity, so SMALL's lower
+    # capacity has no effect on the amount each device receives.
     small = make_client("SMALL", report={"electricLevel": 50}, pack_data=PACK_960WH)
     large = make_client("LARGE", report={"electricLevel": 50}, pack_data=PACK_1920WH)
     aggregator = Aggregator([small, large])
@@ -515,22 +513,22 @@ async def test_write_properties_splits_inverse_max_power_evenly_once_threshold_i
 
 
 @pytest.mark.asyncio
-async def test_write_properties_cap_split_excludes_device_at_soc_limit() -> None:
-    # Real-hardware scenario: a device that has already reached its socSet
-    # target must not keep half the charge ceiling to itself -- its sibling,
-    # which still has headroom, should be able to claim the full total.
+async def test_write_properties_cap_split_ignores_soc_limit() -> None:
+    # Unlike outputLimit/inputLimit, chargeMaxLimit/inverseMaxPower are split
+    # evenly across every configured device regardless of SoC state -- a
+    # device already at its socSet target still gets its even share.
     full = make_client("FULL", report={"electricLevel": 100}, pack_data=PACK_1920WH)
     empty = make_client("EMPTY", report={"electricLevel": 0}, pack_data=PACK_1920WH)
     aggregator = Aggregator([full, empty])
 
     await aggregator.write_properties({"chargeMaxLimit": 800})
 
-    assert full.written == {"chargeMaxLimit": 0.0}
-    assert empty.written == {"chargeMaxLimit": 800.0}
+    assert full.written == {"chargeMaxLimit": 400.0}
+    assert empty.written == {"chargeMaxLimit": 400.0}
 
 
 @pytest.mark.asyncio
-async def test_write_properties_falls_back_to_even_split_for_cap_when_capacity_unknown() -> None:
+async def test_write_properties_splits_cap_evenly_when_capacity_unknown() -> None:
     a = make_client("A")
     b = make_client("B")
     aggregator = Aggregator([a, b])
