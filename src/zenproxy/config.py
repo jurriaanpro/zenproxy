@@ -17,6 +17,7 @@ class ServerSettings(BaseModel):
 
 class AppConfig(BaseModel):
     virtual_sn: str
+    virtual_product: str
     devices: list[RealDevice]
     server: ServerSettings = ServerSettings()
 

@@ -9,6 +9,7 @@ from zenproxy.config import AppConfig, RealDevice
 
 CONFIG = AppConfig(
     virtual_sn="VIRTUAL1",
+    virtual_product="solarFlow800Plus",
     devices=[
         RealDevice(host="10.0.0.1", port=80),
         RealDevice(host="10.0.0.2", port=80),
@@ -48,6 +49,7 @@ def test_get_properties_report_returns_aggregated_properties() -> None:
     assert response.status_code == 200
     assert response.json() == {
         "sn": "VIRTUAL1",
+        "product": "solarFlow800Plus",
         "properties": {"outputHomePower": 150, "electricLevel": 50.0},
         "packData": [PACK1, PACK2],
     }

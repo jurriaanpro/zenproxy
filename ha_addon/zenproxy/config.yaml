@@ -14,12 +14,14 @@ ports_description:
   8080/tcp: zenproxy HTTP API
 options:
   virtual_sn: ZENPROXY000001
+  virtual_product: "solarFlow800Plus"
   port: 8080
   devices:
     - host: 192.168.1.101
       port: 80
 schema:
   virtual_sn: str
+  virtual_product: str
   port: int
   devices:
     - host: str

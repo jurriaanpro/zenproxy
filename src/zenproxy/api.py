@@ -28,6 +28,7 @@ class WriteResponse(BaseModel):
 
 class ReportResponse(BaseModel):
     sn: str
+    product: str
     properties: Properties
     packData: list[dict[str, Any]]
 
@@ -55,7 +56,12 @@ def create_app(config: AppConfig, http_client: httpx.AsyncClient | None = None) 
     @app.get("/properties/report")
     async def get_report() -> ReportResponse:
         properties, pack_data = await aggregator.get_aggregated_report()
-        return ReportResponse(sn=config.virtual_sn, properties=properties, packData=pack_data)
+        return ReportResponse(
+            sn=config.virtual_sn,
+            product=config.virtual_product,
+            properties=properties,
+            packData=pack_data,
+        )
 
     @app.get("/devices")
     async def get_devices() -> DevicesResponse:
