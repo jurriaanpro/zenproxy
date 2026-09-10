@@ -42,6 +42,26 @@ on every invocation, which is wasted work on every container start; calling
 the venv binary directly skips that since `uv sync --frozen --no-dev` already
 ran once at build time.
 
+## MQTT (optional)
+
+zenproxy can publish each *real* device's properties to Home Assistant over
+MQTT discovery, as read-only sensor entities — separate from, and in
+addition to, the HTTP API. This exists because the HTTP API deliberately
+hides the individual devices behind the virtual one; MQTT is how you get
+visibility into per-device state (e.g. each battery's own charge level)
+without giving that up.
+
+Configure it by adding an `mqtt:` section to `config.yaml` (see
+[`config.example.yaml`](config.example.yaml)). In the Home Assistant addon,
+this is automatic instead: the addon requests the `mqtt` Supervisor service,
+and if a broker (e.g. the Mosquitto broker addon) is available, its
+connection details are used with no manual configuration.
+
+Only a curated set of properties is published (see `MQTT_SENSORS` in
+[`src/zenproxy/mqtt.py`](src/zenproxy/mqtt.py)), not every raw device field —
+this keeps each sensor mapped to the right Home Assistant `device_class` and
+unit instead of showing up as an unlabeled number.
+
 ## Design decisions
 
 - **Split, don't broadcast, `chargeMaxLimit`/`inverseMaxPower`.** These are
@@ -97,3 +117,9 @@ ran once at build time.
   Not something the proxy compensates for — automations polling at typical
   intervals (~5s) never notice — but worth knowing if you're scripting
   writes followed immediately by a read during testing.
+- **MQTT publishes per-device state, not the aggregated device.** The HTTP
+  API already fully exposes the virtual/aggregated device; the only thing it
+  doesn't expose is the individual real devices (that's the point of the
+  proxy for automations). So MQTT is the other direction: per-device
+  visibility only, read-only, for dashboards rather than automations. See
+  `src/zenproxy/mqtt.py`.
