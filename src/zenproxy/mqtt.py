@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import TracebackType
 from typing import Any, Protocol
 
 import aiomqtt
@@ -120,7 +121,12 @@ class MqttPublishClient(Protocol):
 
 class MqttClientContext(Protocol):
     async def __aenter__(self) -> MqttPublishClient: ...
-    async def __aexit__(self, *args: object) -> bool | None: ...
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool | None: ...
 
 
 ClientFactory = Callable[[], MqttClientContext]
