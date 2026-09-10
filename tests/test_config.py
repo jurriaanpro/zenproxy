@@ -14,8 +14,16 @@ def test_load_config_parses_example() -> None:
     assert config.server.port == 8080
 
 
-def test_load_config_without_mqtt_section_leaves_mqtt_none() -> None:
-    config = load_config(EXAMPLE_CONFIG)
+def test_load_config_without_mqtt_section_leaves_mqtt_none(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "virtual_sn: TEST\n"
+        "virtual_product: solarFlow800Plus\n"
+        "devices:\n"
+        "  - host: 10.0.0.1\n"
+    )
+
+    config = load_config(config_path)
 
     assert config.mqtt is None
 
