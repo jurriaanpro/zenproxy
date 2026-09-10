@@ -1,7 +1,7 @@
 FROM python:3.14-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git jq \
+    && apt-get install -y --no-install-recommends git jq curl \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir uv
 
