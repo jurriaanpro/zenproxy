@@ -1,6 +1,13 @@
+import asyncio
+import json
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
+import aiomqtt
+from loguru import logger
+
+from zenproxy.aggregator import Aggregator
 from zenproxy.device_client import Properties
 
 BRIDGE_AVAILABILITY_TOPIC = "zenproxy/bridge/availability"
@@ -96,5 +103,86 @@ def state_payload(properties: Properties) -> dict[str, float]:
     for name, spec in MQTT_SENSORS.items():
         value = properties.get(name)
         if isinstance(value, int | float):
-            state[name] = value / spec.scale
+            # Skip the division for an unscaled property so an int input stays
+            # an int (e.g. electricLevel=80 serializes as 80, not 80.0).
+            state[name] = value if spec.scale == 1 else value / spec.scale
     return state
+
+
+RECONNECT_DELAY_SECONDS = 5.0
+
+
+class MqttPublishClient(Protocol):
+    async def publish(
+        self, topic: str, payload: str, *, qos: int = 0, retain: bool = False
+    ) -> None: ...
+
+
+class MqttClientContext(Protocol):
+    async def __aenter__(self) -> MqttPublishClient: ...
+    async def __aexit__(self, *args: object) -> bool | None: ...
+
+
+ClientFactory = Callable[[], MqttClientContext]
+
+
+class MqttPublisher:
+    """Polls all configured devices and publishes their curated properties to
+    MQTT with HA discovery, independent of zenproxy's HTTP API.
+    """
+
+    def __init__(
+        self,
+        aggregator: Aggregator,
+        discovery_prefix: str,
+        poll_interval_seconds: float,
+        client_factory: ClientFactory,
+        reconnect_delay_seconds: float = RECONNECT_DELAY_SECONDS,
+    ) -> None:
+        self._aggregator = aggregator
+        self._discovery_prefix = discovery_prefix
+        self._poll_interval_seconds = poll_interval_seconds
+        self._client_factory = client_factory
+        self._reconnect_delay_seconds = reconnect_delay_seconds
+        self._discovered: set[str] = set()
+
+    async def run(self) -> None:
+        while True:
+            try:
+                async with self._client_factory() as client:
+                    await client.publish(BRIDGE_AVAILABILITY_TOPIC, ONLINE, retain=True)
+                    try:
+                        while True:
+                            await self._poll_once(client)
+                            await asyncio.sleep(self._poll_interval_seconds)
+                    except asyncio.CancelledError:
+                        await client.publish(BRIDGE_AVAILABILITY_TOPIC, OFFLINE, retain=True)
+                        raise
+            except aiomqtt.MqttError as error:
+                logger.warning(
+                    "mqtt connection error: {}, reconnecting in {}s",
+                    error,
+                    self._reconnect_delay_seconds,
+                )
+                await asyncio.sleep(self._reconnect_delay_seconds)
+
+    async def _poll_once(self, client: MqttPublishClient) -> None:
+        reports = await self._aggregator.get_report()
+
+        for sn, properties in reports.items():
+            if sn not in self._discovered:
+                await self._publish_discovery(client, sn)
+                self._discovered.add(sn)
+            await client.publish(state_topic(sn), json.dumps(state_payload(properties)))
+            await client.publish(device_availability_topic(sn), ONLINE, retain=True)
+
+        for sn in self._discovered - set(reports):
+            await client.publish(device_availability_topic(sn), OFFLINE, retain=True)
+
+    async def _publish_discovery(self, client: MqttPublishClient, sn: str) -> None:
+        for property_name in MQTT_SENSORS:
+            await client.publish(
+                discovery_topic(self._discovery_prefix, sn, property_name),
+                json.dumps(discovery_payload(self._discovery_prefix, sn, property_name)),
+                retain=True,
+            )
