@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -162,7 +163,8 @@ class MqttPublisher:
                             await self._poll_once(client)
                             await asyncio.sleep(self._poll_interval_seconds)
                     except asyncio.CancelledError:
-                        await client.publish(BRIDGE_AVAILABILITY_TOPIC, OFFLINE, retain=True)
+                        with contextlib.suppress(aiomqtt.MqttError):
+                            await client.publish(BRIDGE_AVAILABILITY_TOPIC, OFFLINE, retain=True)
                         raise
             except aiomqtt.MqttError as error:
                 logger.warning(
@@ -170,6 +172,7 @@ class MqttPublisher:
                     error,
                     self._reconnect_delay_seconds,
                 )
+                self._discovered.clear()
                 await asyncio.sleep(self._reconnect_delay_seconds)
 
     async def _poll_once(self, client: MqttPublishClient) -> None:

@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -11,6 +12,8 @@ from zenproxy.device_client import DeviceClient
 from zenproxy.mqtt import (
     BRIDGE_AVAILABILITY_TOPIC,
     MQTT_SENSORS,
+    OFFLINE,
+    MqttPublishClient,
     MqttPublisher,
     device_availability_topic,
     discovery_payload,
@@ -117,14 +120,59 @@ class FakeMqttClient:
         self.published.append(PublishCall(topic, payload, retain))
 
 
-class FakeClientContext:
-    """Async context manager wrapping a FakeMqttClient, or raising aiomqtt.MqttError."""
+@dataclass
+class SuspendingFakeMqttClient:
+    """Like FakeMqttClient, but publish() actually suspends (await asyncio.sleep(0))
+    before returning, so a task cancellation can land inside the publish call --
+    the plain FakeMqttClient never suspends, so it can never reproduce that race.
 
-    def __init__(self, client: FakeMqttClient | None = None, raise_on_enter: bool = False) -> None:
+    When fail_on_payload matches, raises aiomqtt.MqttError instead of recording
+    the call, simulating a broker that's already gone by the time the
+    offline-on-cancel publish is attempted.
+    """
+
+    published: list[PublishCall] = field(default_factory=list)
+    fail_on_payload: str | None = None
+
+    async def publish(
+        self, topic: str, payload: str, *, qos: int = 0, retain: bool = False
+    ) -> None:
+        await asyncio.sleep(0)
+        if self.fail_on_payload is not None and payload == self.fail_on_payload:
+            raise aiomqtt.MqttError("broker gone")
+        self.published.append(PublishCall(topic, payload, retain))
+
+
+@dataclass
+class FlakyMqttClient:
+    """FakeMqttClient that raises aiomqtt.MqttError on the Nth publish call
+    (1-indexed), simulating a disconnect mid-run so tests can verify recovery
+    behaviour (e.g. discovery republishing) after reconnecting to a fresh client.
+    """
+
+    fail_at_call: int
+    published: list[PublishCall] = field(default_factory=list)
+    _calls: int = 0
+
+    async def publish(
+        self, topic: str, payload: str, *, qos: int = 0, retain: bool = False
+    ) -> None:
+        self._calls += 1
+        if self._calls == self.fail_at_call:
+            raise aiomqtt.MqttError("connection lost")
+        self.published.append(PublishCall(topic, payload, retain))
+
+
+class FakeClientContext:
+    """Async context manager wrapping any MqttPublishClient, or raising aiomqtt.MqttError."""
+
+    def __init__(
+        self, client: MqttPublishClient | None = None, raise_on_enter: bool = False
+    ) -> None:
         self._client = client
         self._raise_on_enter = raise_on_enter
 
-    async def __aenter__(self) -> FakeMqttClient:
+    async def __aenter__(self) -> MqttPublishClient:
         if self._raise_on_enter:
             raise aiomqtt.MqttError("connection refused")
         assert self._client is not None
@@ -211,6 +259,83 @@ async def test_run_reconnects_after_mqtt_error_and_publishes_offline_on_cancel()
     bridge_calls = [c for c in fake_client.published if c.topic == BRIDGE_AVAILABILITY_TOPIC]
     assert bridge_calls[0].payload == "online"
     assert bridge_calls[-1].payload == "offline"
+
+
+@pytest.mark.asyncio
+async def test_run_completes_on_cancel_even_if_offline_publish_fails() -> None:
+    """Regression test: if the cancellation-time offline publish itself raises
+    aiomqtt.MqttError (broker already gone -- exactly the scenario this path
+    exists to handle), the CancelledError must not be swallowed by the outer
+    except aiomqtt.MqttError handler, or run() loops forever and shutdown hangs.
+
+    Uses SuspendingFakeMqttClient because a publish() that never awaits
+    anything (like plain FakeMqttClient) can never have a cancellation land
+    inside it -- which is exactly why this bug wasn't caught before.
+    """
+    client = make_client_with_report("ABC123", {"electricLevel": 80})
+    aggregator = Aggregator([client])
+    fake_client = SuspendingFakeMqttClient(fail_on_payload=OFFLINE)
+    publisher = MqttPublisher(
+        aggregator=aggregator,
+        discovery_prefix="homeassistant",
+        poll_interval_seconds=0,
+        client_factory=lambda: FakeClientContext(fake_client),
+    )
+
+    task = asyncio.create_task(publisher.run())
+    for _ in range(200):
+        if any(c.topic == BRIDGE_AVAILABILITY_TOPIC for c in fake_client.published):
+            break
+        await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_run_republishes_discovery_after_reconnect() -> None:
+    """Per spec (Lifecycle step 4): on reconnect, discovery configs must be
+    republished, since a broker restart may not have persisted retained
+    messages. Simulates a disconnect (MqttError) after a device has already
+    been discovered once, then asserts the fresh connection republishes
+    discovery for that same device.
+    """
+    client = make_client_with_report("ABC123", {"electricLevel": 80})
+    aggregator = Aggregator([client])
+    # Fail right after the bridge-online publish and all discovery-config
+    # publishes have succeeded once, but before the first state publish --
+    # i.e. the device has already been marked discovered when the connection
+    # drops.
+    flaky_client = FlakyMqttClient(fail_at_call=len(MQTT_SENSORS) + 2)
+    fake_client2 = FakeMqttClient()
+    contexts = iter(
+        [
+            FakeClientContext(flaky_client),
+            FakeClientContext(fake_client2),
+        ]
+    )
+    publisher = MqttPublisher(
+        aggregator=aggregator,
+        discovery_prefix="homeassistant",
+        poll_interval_seconds=0,
+        client_factory=lambda: next(contexts),
+        reconnect_delay_seconds=0,
+    )
+
+    task = asyncio.create_task(publisher.run())
+    for _ in range(500):
+        discovery_calls = [c for c in fake_client2.published if "/config" in c.topic]
+        if len(discovery_calls) == len(MQTT_SENSORS):
+            break
+        await asyncio.sleep(0)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2)
+
+    discovery_calls = [c for c in fake_client2.published if "/config" in c.topic]
+    assert len(discovery_calls) == len(MQTT_SENSORS)
+    assert all(c.retain for c in discovery_calls)
 
 
 def make_client_with_report(sn: str, report: dict[str, Any]) -> FakeDeviceClient:
