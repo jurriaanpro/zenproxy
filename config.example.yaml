@@ -11,3 +11,13 @@ server:
   host: 0.0.0.0
   port: 8080
   poll_interval_seconds: 5.0
+
+# Optional: publish each real device's properties to Home Assistant over
+# MQTT discovery (read-only sensors, independent of the HTTP API above).
+# Omit this section entirely to leave MQTT publishing disabled.
+mqtt:
+  host: 192.168.1.10
+  port: 1883
+  username: mqtt-user
+  password: mqtt-pass
+  discovery_prefix: homeassistant

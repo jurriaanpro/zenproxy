@@ -1,5 +1,5 @@
 name: zenproxy
-version: "0.6.0"
+version: "0.7.0"
 slug: zenproxy
 description: Unifies one or more Zendure home battery devices behind a single virtual device API
 url: https://github.com/jurriaanpro/zenproxy
@@ -12,6 +12,8 @@ ports:
   8080/tcp: 8080
 ports_description:
   8080/tcp: zenproxy HTTP API
+services:
+  - mqtt:want
 options:
   virtual_sn: ZENPROXY000001
   virtual_product: "solarFlow800Plus"
@@ -19,6 +21,7 @@ options:
   devices:
     - host: 192.168.1.101
       port: 80
+  mqtt_enabled: false
 schema:
   virtual_sn: str
   virtual_product: str
@@ -26,3 +29,4 @@ schema:
   devices:
     - host: str
       port: int
+  mqtt_enabled: bool

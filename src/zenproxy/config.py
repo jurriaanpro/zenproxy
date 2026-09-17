@@ -15,11 +15,20 @@ class ServerSettings(BaseModel):
     poll_interval_seconds: float = 5.0
 
 
+class MqttSettings(BaseModel):
+    host: str
+    port: int = 1883
+    username: str | None = None
+    password: str | None = None
+    discovery_prefix: str = "homeassistant"
+
+
 class AppConfig(BaseModel):
     virtual_sn: str
     virtual_product: str
     devices: list[RealDevice]
     server: ServerSettings = ServerSettings()
+    mqtt: MqttSettings | None = None
 
 
 def load_config(path: Path) -> AppConfig:
