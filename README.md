@@ -53,9 +53,12 @@ without giving that up.
 
 Configure it by adding an `mqtt:` section to `config.yaml` (see
 [`config.example.yaml`](config.example.yaml)). In the Home Assistant addon,
-this is automatic instead: the addon requests the `mqtt` Supervisor service,
-and if a broker (e.g. the Mosquitto broker addon) is available, its
-connection details are used with no manual configuration.
+turn on the **Enable MQTT** option in the addon's Configuration tab; once
+enabled, the addon requests the `mqtt` Supervisor service and, if a broker
+(e.g. the Mosquitto broker addon) is available, uses its connection details
+automatically — no manual host/port/credentials needed. It's off by default,
+even when a broker is available, so installing or updating the addon never
+changes existing behavior on its own.
 
 Only a curated set of properties is published (see `MQTT_SENSORS` in
 [`src/zenproxy/mqtt.py`](src/zenproxy/mqtt.py)), not every raw device field —

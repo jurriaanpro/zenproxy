@@ -21,6 +21,7 @@ options:
   devices:
     - host: 192.168.1.101
       port: 80
+  mqtt_enabled: false
 schema:
   virtual_sn: str
   virtual_product: str
@@ -28,3 +29,4 @@ schema:
   devices:
     - host: str
       port: int
+  mqtt_enabled: bool
