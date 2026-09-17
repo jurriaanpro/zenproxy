@@ -21,12 +21,21 @@ class LeaderRotationSettings(BaseModel):
     soc_delta_percent: float = 10.0
 
 
+class MqttSettings(BaseModel):
+    host: str
+    port: int = 1883
+    username: str | None = None
+    password: str | None = None
+    discovery_prefix: str = "homeassistant"
+
+
 class AppConfig(BaseModel):
     virtual_sn: str
     virtual_product: str
     devices: list[RealDevice]
     server: ServerSettings = ServerSettings()
     leader_rotation: LeaderRotationSettings = LeaderRotationSettings()
+    mqtt: MqttSettings | None = None
 
 
 def load_config(path: Path) -> AppConfig:

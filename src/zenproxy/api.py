@@ -1,9 +1,12 @@
+import asyncio
+import contextlib
 import itertools
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+import aiomqtt
 import httpx
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -11,6 +14,7 @@ from pydantic import BaseModel
 from zenproxy.aggregator import Aggregator
 from zenproxy.config import AppConfig
 from zenproxy.device_client import DeviceClient, Properties
+from zenproxy.mqtt import BRIDGE_AVAILABILITY_TOPIC, OFFLINE, MqttPublisher
 
 
 class WriteRequest(BaseModel):
@@ -49,9 +53,34 @@ def create_app(config: AppConfig, http_client: httpx.AsyncClient | None = None) 
     )
     message_ids = itertools.count(1)
 
+    def _mqtt_client_factory() -> aiomqtt.Client:
+        assert config.mqtt is not None
+        return aiomqtt.Client(
+            hostname=config.mqtt.host,
+            port=config.mqtt.port,
+            username=config.mqtt.username,
+            password=config.mqtt.password,
+            will=aiomqtt.Will(topic=BRIDGE_AVAILABILITY_TOPIC, payload=OFFLINE, retain=True),
+        )
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        mqtt_task: asyncio.Task[None] | None = None
+        if config.mqtt is not None:
+            publisher = MqttPublisher(
+                aggregator=aggregator,
+                discovery_prefix=config.mqtt.discovery_prefix,
+                poll_interval_seconds=config.server.poll_interval_seconds,
+                client_factory=_mqtt_client_factory,
+            )
+            mqtt_task = asyncio.create_task(publisher.run())
+
         yield
+
+        if mqtt_task is not None:
+            mqtt_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await mqtt_task
         if owns_client:
             await client.aclose()
 

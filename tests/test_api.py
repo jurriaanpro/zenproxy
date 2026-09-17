@@ -1,11 +1,13 @@
+import asyncio
 import json
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 
 from zenproxy.api import create_app
-from zenproxy.config import AppConfig, LeaderRotationSettings, RealDevice
+from zenproxy.config import AppConfig, LeaderRotationSettings, MqttSettings, RealDevice
 
 CONFIG = AppConfig(
     virtual_sn="VIRTUAL1",
@@ -190,3 +192,44 @@ def test_leader_rotation_config_disables_rotation_on_the_aggregator() -> None:
         "sn": "DEV2",
         "properties": {"outputLimit": 0.0},
     }
+
+
+class RecordingPublisher:
+    instances: list[RecordingPublisher] = []
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.cancelled = False
+        RecordingPublisher.instances.append(self)
+
+    async def run(self) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+def test_mqtt_publisher_starts_and_stops_when_mqtt_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    RecordingPublisher.instances = []
+    monkeypatch.setattr("zenproxy.api.MqttPublisher", RecordingPublisher)
+    config = CONFIG.model_copy(update={"mqtt": MqttSettings(host="core-mosquitto")})
+
+    with TestClient(create_app(config)):
+        assert len(RecordingPublisher.instances) == 1
+        assert RecordingPublisher.instances[0].cancelled is False
+
+    assert RecordingPublisher.instances[0].cancelled is True
+
+
+def test_mqtt_publisher_not_started_when_mqtt_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    RecordingPublisher.instances = []
+    monkeypatch.setattr("zenproxy.api.MqttPublisher", RecordingPublisher)
+
+    with TestClient(create_app(CONFIG)):
+        pass
+
+    assert RecordingPublisher.instances == []
