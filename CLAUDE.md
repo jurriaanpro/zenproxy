@@ -1,3 +1,5 @@
+@AGENTS.md
+
 # Introduction
 
 This project is to act as a proxy between 1 or more Zendure home battery devices. It should use [zenSDK](https://github.com/Zendure/zenSDK/tree/main) for communicating with the devices. The point is to let >1 Zendure home battery devices act as one big one and divide requested power in a smart way over available devices.

@@ -91,6 +91,10 @@ the same pattern used by official HA addons that wrap external source. This
 means addon builds always pull from `main` (or `ZENPROXY_REF`), so pushes to
 `main` are effectively releases as far as the addon is concerned.
 
+Version bumps in [`config.yaml`](ha_addon/zenproxy/config.yaml) get a matching
+entry in [`CHANGELOG.md`](ha_addon/zenproxy/CHANGELOG.md), which Supervisor
+renders in the addon's info tab.
+
 At container runtime, `run.sh` renders `/data/options.json` (the addon's
 config, in HA's format) into zenproxy's own `config.yaml` shape, then execs
 `/app/.venv/bin/zenproxy` directly rather than `uv run zenproxy`. `uv run`
