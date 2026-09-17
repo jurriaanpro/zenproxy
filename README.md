@@ -15,6 +15,63 @@ Copy [`config.example.yaml`](config.example.yaml) to `config.yaml` and fill in
 the host of each real device. Serial numbers are learned automatically from
 each device's `/properties/report` response — no need to specify them.
 
+## Configuration
+
+Every section below except `devices` is optional and falls back to the
+defaults shown if omitted. Where an option also exists as a Home Assistant
+addon option, its name is noted — the addon exposes options as flat keys
+(e.g. `leader_rotation_soc_delta_percent`) since the Supervisor UI doesn't
+support nested config.
+
+### Core
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `virtual_sn` | — | Serial number the virtual (aggregated) device reports. |
+| `virtual_product` | — | Product ID the virtual device reports, e.g. `solarFlow800Plus`. |
+| `devices` | — | List of `{host, port}` for each real Zendure device to unify. `port` defaults to `80`. |
+
+### `server`
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `host` | `0.0.0.0` | Interface the HTTP API binds to. |
+| `port` | `8080` | Port the HTTP API listens on. Addon option: `port`. |
+| `poll_interval_seconds` | `5.0` | How often the MQTT publisher (if enabled) polls devices for state. |
+
+### `leader_rotation` — spread charge/discharge wear across devices
+
+A request small enough to fit comfortably on one device is concentrated on a
+single "leader" rather than split into inefficient trickles (see
+[Design decisions](#design-decisions)). Left alone, that leader would
+drain/charge all the way to its floor or ceiling before another device ever
+gets a turn, cycling that pack harder than its siblings. `leader_rotation`
+hands leadership to the next eligible device once the current leader has
+moved far enough, even though it's still eligible.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `enabled` | `true` | Turn rotation on/off. Addon option: `leader_rotation_enabled`. Disabling restores the old behavior: one device leads until it's actually excluded (hits its floor/ceiling). |
+| `soc_delta_percent` | `10.0` | How many `electricLevel` percentage points the leader may drain/charge before handing off to the next device. Addon option: `leader_rotation_soc_delta_percent`. |
+
+### `mqtt` — per-device visibility in Home Assistant (optional)
+
+The HTTP API only exposes the virtual/aggregated device, by design — `mqtt`
+is how you additionally get read-only visibility into each *real* device
+(e.g. each battery's own charge level), published as Home Assistant MQTT
+discovery sensors. Omit this section entirely to leave MQTT publishing off.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `host` | — | Broker hostname/IP. Required to enable MQTT. |
+| `port` | `1883` | Broker port. |
+| `username` / `password` | `null` | Broker credentials, if required. |
+| `discovery_prefix` | `homeassistant` | HA discovery topic prefix. |
+
+In the Home Assistant addon, this is a single **Enable MQTT** toggle
+(`mqtt_enabled`) instead — see [Home Assistant addon](#home-assistant-addon)
+for how it fills in the rest automatically.
+
 ## Development
 
 ```bash
@@ -42,28 +99,16 @@ on every invocation, which is wasted work on every container start; calling
 the venv binary directly skips that since `uv sync --frozen --no-dev` already
 ran once at build time.
 
-## MQTT (optional)
-
-zenproxy can publish each *real* device's properties to Home Assistant over
-MQTT discovery, as read-only sensor entities — separate from, and in
-addition to, the HTTP API. This exists because the HTTP API deliberately
-hides the individual devices behind the virtual one; MQTT is how you get
-visibility into per-device state (e.g. each battery's own charge level)
-without giving that up.
-
-Configure it by adding an `mqtt:` section to `config.yaml` (see
-[`config.example.yaml`](config.example.yaml)). In the Home Assistant addon,
-turn on the **Enable MQTT** option in the addon's Configuration tab; once
-enabled, the addon requests the `mqtt` Supervisor service and, if a broker
-(e.g. the Mosquitto broker addon) is available, uses its connection details
-automatically — no manual host/port/credentials needed. It's off by default,
-even when a broker is available, so installing or updating the addon never
-changes existing behavior on its own.
-
-Only a curated set of properties is published (see `MQTT_SENSORS` in
-[`src/zenproxy/mqtt.py`](src/zenproxy/mqtt.py)), not every raw device field —
-this keeps each sensor mapped to the right Home Assistant `device_class` and
-unit instead of showing up as an unlabeled number.
+Turning on the addon's **Enable MQTT** option (`mqtt_enabled`) doesn't require
+filling in broker details by hand: the addon requests the `mqtt` Supervisor
+service, and if a broker (e.g. the Mosquitto broker addon) is available, uses
+its connection details automatically. It's off by default, even when a
+broker is available, so installing or updating the addon never changes
+existing behavior on its own. Only a curated set of properties is published
+(see `MQTT_SENSORS` in [`src/zenproxy/mqtt.py`](src/zenproxy/mqtt.py)), not
+every raw device field — this keeps each sensor mapped to the right Home
+Assistant `device_class` and unit instead of showing up as an unlabeled
+number.
 
 ## Design decisions
 
@@ -117,13 +162,11 @@ unit instead of showing up as an unlabeled number.
   point) would otherwise stay on that same device all the way to its
   floor/ceiling, wearing that pack's cycle count faster than its siblings.
   `Aggregator._rotate_leader_if_drained()` compares the leader's current
-  `electricLevel` to the value it had when it took the lead; once that gap
-  reaches `leader_rotation.soc_delta_percent` (default 10 points), the
-  leader moves to the back of the priority order so the next-ranked device
-  takes over, spreading wear across the fleet over time. This is
-  configurable (`leader_rotation.enabled` / `leader_rotation.soc_delta_percent`
-  in `config.yaml`, or the addon's "Leader rotation" options) and defaults
-  to on. See `src/zenproxy/aggregator.py`.
+  `electricLevel` to the value it had when it took the lead and, once that
+  gap is large enough, moves it to the back of the priority order so the
+  next-ranked device takes over. Configurable — see
+  [`leader_rotation`](#leader_rotation--spread-chargedischarge-wear-across-devices)
+  above. See `src/zenproxy/aggregator.py`.
 - **Write responses mimic the real device's ack shape**, not an echo of the
   submitted properties: `{timestamp, messageId, success, code, sn}`. An
   earlier version echoed back `{"sn": ..., "properties": ...}`, which looked
@@ -137,5 +180,6 @@ unit instead of showing up as an unlabeled number.
   API already fully exposes the virtual/aggregated device; the only thing it
   doesn't expose is the individual real devices (that's the point of the
   proxy for automations). So MQTT is the other direction: per-device
-  visibility only, read-only, for dashboards rather than automations. See
-  `src/zenproxy/mqtt.py`.
+  visibility only, read-only, for dashboards rather than automations.
+  Configurable — see [`mqtt`](#mqtt--per-device-visibility-in-home-assistant-optional)
+  above. See `src/zenproxy/mqtt.py`.
