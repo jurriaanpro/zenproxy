@@ -88,6 +88,19 @@ ran once at build time.
   actually drops out (hits its floor/ceiling) or a new one becomes
   eligible. This state lives in memory on the `Aggregator` instance and
   resets on restart.
+- **Leadership rotates once the leader has drained/charged past a SoC
+  delta, even while it's still eligible.** The sticky priority above means
+  a request small enough to concentrate on one device (see the previous
+  point) would otherwise stay on that same device all the way to its
+  floor/ceiling, wearing that pack's cycle count faster than its siblings.
+  `Aggregator._rotate_leader_if_drained()` compares the leader's current
+  `electricLevel` to the value it had when it took the lead; once that gap
+  reaches `leader_rotation.soc_delta_percent` (default 10 points), the
+  leader moves to the back of the priority order so the next-ranked device
+  takes over, spreading wear across the fleet over time. This is
+  configurable (`leader_rotation.enabled` / `leader_rotation.soc_delta_percent`
+  in `config.yaml`, or the addon's "Leader rotation" options) and defaults
+  to on. See `src/zenproxy/aggregator.py`.
 - **Write responses mimic the real device's ack shape**, not an echo of the
   submitted properties: `{timestamp, messageId, success, code, sn}`. An
   earlier version echoed back `{"sn": ..., "properties": ...}`, which looked

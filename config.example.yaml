@@ -11,3 +11,7 @@ server:
   host: 0.0.0.0
   port: 8080
   poll_interval_seconds: 5.0
+
+leader_rotation:
+  enabled: true
+  soc_delta_percent: 10.0

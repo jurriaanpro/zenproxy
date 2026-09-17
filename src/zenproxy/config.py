@@ -15,11 +15,18 @@ class ServerSettings(BaseModel):
     poll_interval_seconds: float = 5.0
 
 
+class LeaderRotationSettings(BaseModel):
+    # See ROTATION_SOC_DELTA in zenproxy.aggregator for what these control.
+    enabled: bool = True
+    soc_delta_percent: float = 10.0
+
+
 class AppConfig(BaseModel):
     virtual_sn: str
     virtual_product: str
     devices: list[RealDevice]
     server: ServerSettings = ServerSettings()
+    leader_rotation: LeaderRotationSettings = LeaderRotationSettings()
 
 
 def load_config(path: Path) -> AppConfig:

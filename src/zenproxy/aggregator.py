@@ -71,6 +71,16 @@ DISCHARGE_CAP_PROPERTY = "inverseMaxPower"
 # share at or above this value.
 PER_DEVICE_MIN_WATTS = 200.0
 
+# When a request is small enough to stay on a single leader (see
+# PER_DEVICE_MIN_WATTS above), that leader would otherwise drain/charge all
+# the way to its floor/ceiling before handing off, concentrating cycle wear
+# on one pack. Once the leader's electricLevel has moved this many
+# percentage points since it took over, leadership rotates to the next
+# device in priority order -- even though the leader is still eligible --
+# so small, sustained requests get spread across the fleet over time.
+# Configurable via AppConfig.leader_rotation; this is just the default.
+ROTATION_SOC_DELTA = 10.0
+
 DEFAULT_MIN_SOC = 0
 DEFAULT_SOC_SET = 100
 
@@ -245,8 +255,15 @@ def _priority_split(
 
 
 class Aggregator:
-    def __init__(self, clients: list[DeviceClient]) -> None:
+    def __init__(
+        self,
+        clients: list[DeviceClient],
+        rotation_enabled: bool = True,
+        rotation_soc_delta: float = ROTATION_SOC_DELTA,
+    ) -> None:
         self.clients = clients
+        self._rotation_enabled = rotation_enabled
+        self._rotation_soc_delta = rotation_soc_delta
         # Which device leads a charge/discharge split, kept sticky across
         # calls (keyed by charging direction) so that whichever device is
         # currently active keeps draining/charging until it's actually
@@ -256,6 +273,10 @@ class Aggregator:
         # both packs converging on the same SoC instead of one depleting
         # before the next kicks in.
         self._priority_order: dict[bool, list[DeviceClient]] = {}
+        # electricLevel of the current leader (priority_order[charging][0])
+        # when it took that position, used to detect when it's time to
+        # rotate (see ROTATION_SOC_DELTA).
+        self._leader_soc_anchor: dict[bool, tuple[DeviceClient, float]] = {}
 
     async def get_report(self) -> dict[str, Properties]:
         results = await asyncio.gather(
@@ -383,7 +404,10 @@ class Aggregator:
         return weights
 
     def _stable_priority(
-        self, charging: bool, weights: dict[DeviceClient, float]
+        self,
+        charging: bool,
+        weights: dict[DeviceClient, float],
+        states: dict[DeviceClient, Properties],
     ) -> list[DeviceClient]:
         """Order eligible devices for a split, keeping the previous leader(s) in
         place as long as they're still eligible.
@@ -402,7 +426,41 @@ class Aggregator:
             reverse=True,
         )
         order = kept + newcomers
+        order = self._rotate_leader_if_drained(charging, order, states)
         self._priority_order[charging] = order
+        return order
+
+    def _rotate_leader_if_drained(
+        self,
+        charging: bool,
+        order: list[DeviceClient],
+        states: dict[DeviceClient, Properties],
+    ) -> list[DeviceClient]:
+        """Move the current leader to the back of `order` once its electricLevel
+        has moved `self._rotation_soc_delta` points since it took the lead, so a
+        small sustained request doesn't concentrate wear on one device."""
+        if not self._rotation_enabled or len(order) < 2:
+            self._leader_soc_anchor.pop(charging, None)
+            return order
+
+        leader = order[0]
+        level = states.get(leader, {}).get("electricLevel")
+        if not isinstance(level, int | float):
+            return order
+
+        anchor = self._leader_soc_anchor.get(charging)
+        if anchor is None or anchor[0] != leader:
+            self._leader_soc_anchor[charging] = (leader, level)
+            return order
+
+        if abs(level - anchor[1]) >= self._rotation_soc_delta:
+            order = order[1:] + [leader]
+            new_leader = order[0]
+            new_level = states.get(new_leader, {}).get("electricLevel")
+            self._leader_soc_anchor[charging] = (
+                new_leader,
+                new_level if isinstance(new_level, int | float) else level,
+            )
         return order
 
     def _apply_split(
@@ -455,7 +513,7 @@ class Aggregator:
                 per_device[client][property_name] = share
             return
 
-        priority = self._stable_priority(charging, weights)
+        priority = self._stable_priority(charging, weights, states)
         shares = _priority_split(total, priority, caps)
         distributed = sum(shares.values())
         if distributed < total - 1e-6:

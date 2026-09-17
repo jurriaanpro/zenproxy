@@ -199,6 +199,58 @@ async def test_write_properties_keeps_the_same_device_active_despite_small_soc_s
 
 
 @pytest.mark.asyncio
+async def test_write_properties_rotates_leader_once_soc_drifts_past_the_rotation_threshold() -> (
+    None
+):
+    # A leads (higher electricLevel) and keeps leading through small swings,
+    # but once it has drained 10+ points since it took over -- well before
+    # hitting its (default) minSoc floor -- leadership rotates to B so the
+    # wear of small, sub-threshold requests doesn't fall on one pack alone.
+    a = make_client("A", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    b = make_client("B", report={"electricLevel": 49}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([a, b])
+
+    await aggregator.write_properties({"outputLimit": 100})
+    assert a.written == {"outputLimit": 100.0}
+    assert b.written == {"outputLimit": 0.0}
+
+    a._report["electricLevel"] = 39  # 11 points below A's anchor of 50
+    await aggregator.write_properties({"outputLimit": 100})
+    assert a.written == {"outputLimit": 0.0}
+    assert b.written == {"outputLimit": 100.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_does_not_rotate_leader_when_rotation_disabled() -> None:
+    a = make_client("A", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    b = make_client("B", report={"electricLevel": 49}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([a, b], rotation_enabled=False)
+
+    await aggregator.write_properties({"outputLimit": 100})
+    assert a.written == {"outputLimit": 100.0}
+
+    a._report["electricLevel"] = 30  # well past the default 10-point threshold
+    await aggregator.write_properties({"outputLimit": 100})
+    assert a.written == {"outputLimit": 100.0}
+    assert b.written == {"outputLimit": 0.0}
+
+
+@pytest.mark.asyncio
+async def test_write_properties_rotates_leader_using_a_custom_soc_delta() -> None:
+    a = make_client("A", report={"electricLevel": 50}, pack_data=PACK_1920WH)
+    b = make_client("B", report={"electricLevel": 49}, pack_data=PACK_1920WH)
+    aggregator = Aggregator([a, b], rotation_soc_delta=5.0)
+
+    await aggregator.write_properties({"outputLimit": 100})
+    assert a.written == {"outputLimit": 100.0}
+
+    a._report["electricLevel"] = 44  # 6 points below anchor, past the custom 5-point delta
+    await aggregator.write_properties({"outputLimit": 100})
+    assert a.written == {"outputLimit": 0.0}
+    assert b.written == {"outputLimit": 100.0}
+
+
+@pytest.mark.asyncio
 async def test_write_properties_hands_off_once_the_active_device_hits_its_floor() -> None:
     # Once A actually reaches its minSoc floor and is excluded, B takes over
     # -- the hand-off happens on genuine exclusion, not a ranking swap.

@@ -5,7 +5,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from zenproxy.api import create_app
-from zenproxy.config import AppConfig, RealDevice
+from zenproxy.config import AppConfig, LeaderRotationSettings, RealDevice
 
 CONFIG = AppConfig(
     virtual_sn="VIRTUAL1",
@@ -120,4 +120,73 @@ def test_post_properties_write_splits_output_limit() -> None:
     assert json.loads(dev2_route.calls.last.request.content) == {
         "sn": "DEV2",
         "properties": {"outputLimit": 100.0},
+    }
+
+
+@respx.mock
+def test_leader_rotation_config_disables_rotation_on_the_aggregator() -> None:
+    config = CONFIG.model_copy(
+        update={"leader_rotation": LeaderRotationSettings(enabled=False)}
+    )
+    dev1_report_route = respx.get("http://10.0.0.1:80/properties/report").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sn": "DEV1",
+                "properties": {"electricLevel": 50},
+                "packData": [PACK1],
+            },
+        )
+    )
+    respx.get("http://10.0.0.2:80/properties/report").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "sn": "DEV2",
+                "properties": {"electricLevel": 49},
+                "packData": [PACK2],
+            },
+        )
+    )
+    dev1_write_route = respx.post("http://10.0.0.1:80/properties/write").mock(
+        return_value=httpx.Response(
+            200, json={"timestamp": 1, "messageId": 1, "success": True, "code": 200, "sn": "DEV1"}
+        )
+    )
+    dev2_write_route = respx.post("http://10.0.0.2:80/properties/write").mock(
+        return_value=httpx.Response(
+            200, json={"timestamp": 1, "messageId": 1, "success": True, "code": 200, "sn": "DEV2"}
+        )
+    )
+
+    with TestClient(create_app(config)) as test_client:
+        test_client.post(
+            "/properties/write",
+            json={"sn": "VIRTUAL1", "properties": {"outputLimit": 100}},
+        )
+        # DEV1 drains 30 points, well past the default 10-point rotation
+        # threshold -- but rotation is disabled, so it should stay leader.
+        dev1_report_route.mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "sn": "DEV1",
+                    "properties": {"electricLevel": 20},
+                    "packData": [PACK1],
+                },
+            )
+        )
+        response = test_client.post(
+            "/properties/write",
+            json={"sn": "VIRTUAL1", "properties": {"outputLimit": 100}},
+        )
+
+    assert response.status_code == 200
+    assert json.loads(dev1_write_route.calls.last.request.content) == {
+        "sn": "DEV1",
+        "properties": {"outputLimit": 100.0},
+    }
+    assert json.loads(dev2_write_route.calls.last.request.content) == {
+        "sn": "DEV2",
+        "properties": {"outputLimit": 0.0},
     }

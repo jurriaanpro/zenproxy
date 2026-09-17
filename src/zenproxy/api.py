@@ -42,7 +42,11 @@ def create_app(config: AppConfig, http_client: httpx.AsyncClient | None = None) 
     client = http_client or httpx.AsyncClient()
     owns_client = http_client is None
     clients = [DeviceClient(device, client) for device in config.devices]
-    aggregator = Aggregator(clients)
+    aggregator = Aggregator(
+        clients,
+        rotation_enabled=config.leader_rotation.enabled,
+        rotation_soc_delta=config.leader_rotation.soc_delta_percent,
+    )
     message_ids = itertools.count(1)
 
     @asynccontextmanager

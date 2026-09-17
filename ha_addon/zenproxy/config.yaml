@@ -1,5 +1,5 @@
 name: zenproxy
-version: "0.6.0"
+version: "0.7.0"
 slug: zenproxy
 description: Unifies one or more Zendure home battery devices behind a single virtual device API
 url: https://github.com/jurriaanpro/zenproxy
@@ -19,6 +19,8 @@ options:
   devices:
     - host: 192.168.1.101
       port: 80
+  leader_rotation_enabled: true
+  leader_rotation_soc_delta_percent: 10.0
 schema:
   virtual_sn: str
   virtual_product: str
@@ -26,3 +28,5 @@ schema:
   devices:
     - host: str
       port: int
+  leader_rotation_enabled: bool
+  leader_rotation_soc_delta_percent: float
